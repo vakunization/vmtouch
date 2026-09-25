@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DVMFTOUCH_SANITIZE=ON
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Verify sanitizer linked
+        run: ldd build/vmtouch | grep -qi 'libasan\|libubsan'
+
+      - name: Run tests
+        shell: bash
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          VMFILE=./build/vmtouch bash tests/run.sh 2>&1 | tee logs/test.log
+
+      - name: Assert no sanitizer reports
+        run: |
+          if grep -E 'ERROR: AddressSanitizer|ERROR: LeakSanitizer|runtime error:|SUMMARY: UndefinedBehaviorSanitizer' logs/test.log; then
+            echo "::error::sanitizer reported issues"
+            exit 1
+          fi
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log
+          path: logs/
