@@ -19,6 +19,8 @@ public:
     // sink may be null (no verbose output); warn may be null (warnings
     // dropped — the CLI installs a printer honoring -q instead).
     Session(Options opts, std::unique_ptr<cache::ProgressSink> sink, WarnFn warn);
+    // Same, with a pre-populated FileFilter (ownership moves into Session).
+    Session(Options opts, FileFilter filter, std::unique_ptr<cache::ProgressSink> sink, WarnFn warn);
     ~Session();
 
     Session(const Session&) = delete;

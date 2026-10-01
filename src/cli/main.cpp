@@ -27,7 +27,6 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 
 #define RESIDENCY_CHART_WIDTH 60
 #define CHART_UPDATE_INTERVAL 0.1
-#define MAX_CRAWL_DEPTH 1024
 
 #if defined(__linux__) || (defined(__hpux) && !defined(__LP64__))
 // Make sure off_t is 64 bits on linux and when creating 32bit programs
@@ -84,31 +83,10 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #include "core/filters.h"
 #include "core/cache.h"
 #include "core/session.h"
+#include "core/crawl.h"
 
 long pagesize;
 
-struct TouchContext {
-	Stats& s;
-	FileInfoRange& f;
-};
-
-struct CrawlContext {
-	Options& opts;
-	TouchContext& tCtx;
-		
-	int64_t total_files = 0;
-	int64_t total_dirs = 0;
-
-	int curr_crawl_depth = 0;
-	ino_t crawl_inodes[MAX_CRAWL_DEPTH];
-	
-	// remember all inodes (for files with inode count > 1) to find duplicates
-	void *seen_inodes = nullptr;
-	dev_t orig_device = 0;
-	int orig_device_inited = 0;
-
-	FileFilter filter;
-};
 
 
 
@@ -430,221 +408,10 @@ public:
 
 static ChartSink g_chart_sink;
 static std::unique_ptr<Session> g_session;
-
-// Shim: delegates to the Session, which owns open/retry/checks and calls
-// the cache engine. The -p range is synced per call because getopt writes
-// it into tCtx.f after the Session was constructed.
-void vmtouch_file(char *path, Options& o, TouchContext& tCtx) {
-  (void)o; (void)tCtx;   // session owns options/stats now; range synced after getopt
-  g_session->process_file(path);
-}
-
-
-// compare device and inode information
-int compare_func(const void *p1, const void *p2)
-{
-  const struct dev_and_inode *kp1 = (const struct dev_and_inode*)p1; 
-  const struct dev_and_inode *kp2 = (const struct dev_and_inode*)p2;
-  int cmp1;
-  cmp1 = (kp1->ino > kp2->ino) - (kp1->ino < kp2->ino);
-  if (cmp1 != 0)
-    return cmp1;
-  return (kp1->dev > kp2->dev) - (kp1->dev < kp2->dev);
-}
-
-// Fix upstream leak: the tsearch tree of seen dev/ino records was never
-// freed (found by LeakSanitizer once a hardlinked-file test existed).
-static void free_dev_and_inode(void *p) {
-  free(p);
-}
-
-// atexit handlers take no arguments, and tsearch(3) may reallocate the tree
-// root as nodes are added, so add_object() re-syncs this pointer on every
-// insert; free_seen_inodes() runs at process exit via atexit (registered in
-// main).
-static void *g_seen_inodes_tree = NULL;
-
-static void free_seen_inodes(void) {
-  if (g_seen_inodes_tree) {
-    tdestroy(g_seen_inodes_tree, free_dev_and_inode);
-    g_seen_inodes_tree = NULL;
-  }
-}
-
-// add device and inode information to the tree of known inodes
-static inline void add_object (struct stat *st, void*& seen_inodes)
-{
-  struct dev_and_inode *newp = (struct dev_and_inode*)malloc (sizeof (struct dev_and_inode));
-  if (newp == NULL) {
-    fatal("malloc: out of memory");
-  }
-  newp->dev = st->st_dev;
-  newp->ino = st->st_ino;
-  if (tsearch(newp, &seen_inodes, compare_func) == NULL) {
-    fatal("tsearch: out of memory");
-  }
-  // keep the atexit hook in sync with the (possibly reallocated) tree root
-  g_seen_inodes_tree = seen_inodes;
-}
-
-// is_ignored()/is_filename_filtered() moved to FileFilter (core/filters.cpp)
-// which owns both pattern lists — fixing the latent bug where these took the
-// list as a parameter but read the global counters.
+static std::unique_ptr<Crawler> g_crawler;
 
 
 
-// return true only if the device and inode information has not been added before
-static inline int find_object(struct stat *st, void*& seen_inodes)
-{
-  struct dev_and_inode obj;
-  void *res;
-  obj.dev = st->st_dev;
-  obj.ino = st->st_ino;
-  res = (void *) tfind(&obj, &seen_inodes, compare_func);
-  return res != (void *) NULL;
-}
-
-void vmtouch_crawl(char* path, CrawlContext& ctx) {
-  struct stat sb;
-  DIR *dirp;
-  struct dirent *de;
-  char npath[PATH_MAX];
-  int res;
-  int tp_path_len = strlen(path);
-  int i;
-
-  if (path[tp_path_len-1] == '/' && tp_path_len > 1) path[tp_path_len-1] = '\0'; // prevent ugly double slashes when printing path names
-
-  if (ctx.filter.is_ignored(path)) {
-    return;
-  }
-
-  res = ctx.opts.followsymlinks ? stat(path, &sb) : lstat(path, &sb);
-
-  if (res) {
-    warning("unable to stat %s (%s)", ctx.opts.quiet, path, strerror(errno));
-    return;
-  } else {
-    if (S_ISLNK(sb.st_mode)) {
-      warning("not following symbolic link %s", ctx.opts.quiet, path);
-      return;
-    }
-
-    if (ctx.opts.singlefilesystem) {
-      if (!ctx.orig_device_inited) {
-        ctx.orig_device = sb.st_dev;
-        ctx.orig_device_inited = 1;
-      } else {
-        if (sb.st_dev != ctx.orig_device) {
-          warning("not recursing into separate filesystem %s", ctx.opts.quiet, path);
-          return;
-        }
-      }
-    }
-
-    if (!ctx.opts.ignorehardlinkeduplictes && sb.st_nlink > 1) {
-      /*
-       * For files with more than one link to it, ignore it if we already know
-       * inode.  Without this check files copied as hardlinks (cp -al) are
-       * counted twice (which may lead to a cache usage of more than 100% of
-       * RAM).
-       */
-      if (find_object(&sb, ctx.seen_inodes)) {
-        // we already saw the device and inode referenced by this file
-        return;
-      } else {
-        add_object(&sb, ctx.seen_inodes);
-      }
-    }
-
-    if (S_ISDIR(sb.st_mode)) {
-      for (i = 0; i < ctx.curr_crawl_depth; i++) {
-        if (ctx.crawl_inodes[i] == sb.st_ino) {
-          warning("symbolic link loop detected: %s", ctx.opts.quiet, path);
-          return;
-        }
-      }
-
-      if (ctx.curr_crawl_depth == MAX_CRAWL_DEPTH)
-        fatal("maximum directory crawl depth reached: %s", path);
-
-      ctx.total_dirs++;
-
-      ctx.crawl_inodes[ctx.curr_crawl_depth] = sb.st_ino;
-
-      retry_opendir:
-
-      dirp = opendir(path);
-
-      if (dirp == NULL) {
-        if (errno == ENFILE || errno == EMFILE) {
-          increment_nofile_rlimit();
-          goto retry_opendir;
-        }
-
-        warning("unable to opendir %s (%s), skipping", ctx.opts.quiet,  path, strerror(errno));
-        return;
-      }
-
-      while((de = readdir(dirp)) != NULL) {
-        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
-
-        if (snprintf(npath, sizeof(npath), "%s/%s", path, de->d_name) >= sizeof(npath)) {
-          warning("path too long %s", ctx.opts.quiet, path);
-          goto bail;
-        }
-
-        ctx.curr_crawl_depth++;
-        vmtouch_crawl(npath, ctx);
-        ctx.curr_crawl_depth--;
-      }
-
-      bail:
-
-      if (closedir(dirp)) {
-        warning("unable to closedir %s (%s)", ctx.opts.quiet, path, strerror(errno));
-        return;
-      }
-    } else if (S_ISLNK(sb.st_mode)) {
-      warning("not following symbolic link %s", ctx.opts.quiet, path);
-      return;
-    } else if (S_ISREG(sb.st_mode) || S_ISBLK(sb.st_mode)) {
-      if (ctx.filter.is_filename_filtered(path)) {
-        ctx.total_files++;
-        vmtouch_file(path, ctx.opts, ctx.tCtx);
-      }
-    } else {
-      warning("skipping non-regular file: %s", ctx.opts.quiet, path);
-    }
-  }
-}
-
-static void vmtouch_batch_crawl(CrawlContext& ctx) {
-  FILE *f;
-  char *line = NULL;
-  size_t len = 0;
-  ssize_t read;
-  int delim = ctx.opts.zero_delim ? '\0' : '\n';
-
-  if (!strcmp(ctx.opts.batch, "-")) {
-    f = stdin;
-  } else {
-    f = fopen(ctx.opts.batch, "r");
-    if (!f) {
-      warning("unable to open %s (%s), skipping",ctx.opts.quiet, ctx.opts.batch, strerror(errno));
-      return;
-    }
-  }
-
-  while ((read = getdelim(&line, &len, delim, f)) != -1) {
-    // strip the newline character
-    line[read-1] = '\0';
-    vmtouch_crawl(line, ctx);
-  }
-
-  free(line);
-  fclose(f);
-}
 
 static void remove_pidfile(Options& o) {
   int res = 0;
@@ -709,11 +476,8 @@ static int run(int argc, char **argv) {
   struct timeval end_time;
 
   Options o;
-  Stats s;   // pre-session scratch; unused after g_session exists (commit 7 removes)
   FileInfoRange f;
-  TouchContext tCtx {s, f};
-  CrawlContext ctx {o, tCtx};
-  atexit(free_seen_inodes);
+  FileFilter cli_filter;   // filled during getopt, ownership moves into Session
 
   if (pipe(exit_pipe))
     fatal("pipe: %s", strerror(errno));
@@ -736,8 +500,8 @@ static int run(int argc, char **argv) {
       case 'F': o.singlefilesystem = 1; break;
       case 'h': o.ignorehardlinkeduplictes = 1; break;
       case 'p': parse_range(optarg, f); break;
-      case 'i': parse_ignore_item(optarg, ctx.filter); break;
-      case 'I': parse_filename_filter_item(optarg, ctx.filter); break;
+      case 'i': parse_ignore_item(optarg, cli_filter); break;
+      case 'I': parse_filename_filter_item(optarg, cli_filter); break;
       case 'm': {
         int64_t val = parse_size(optarg);
         o.max_file_size = (size_t) val;
@@ -787,12 +551,13 @@ static int run(int argc, char **argv) {
   // Session created AFTER option parsing/validation so it holds the final
   // Options; owns the ChartSink and the warning printer (quiet handled
   // inside Session::warning).
-  g_session = std::make_unique<Session>(o, std::make_unique<ChartSink>(),
+  g_session = std::make_unique<Session>(o, std::move(cli_filter), std::make_unique<ChartSink>(),
       [](std::string_view msg) {
         fprintf(stderr, "vmtouch: WARNING: %.*s\n",
                 static_cast<int>(msg.size()), msg.data());
       });
   g_session->set_range(f);
+  g_crawler = std::make_unique<Crawler>(*g_session);
 
   // Must be done now because mlock() not inherited across fork()
   if (o.daemon) go_daemon(o);
@@ -800,10 +565,10 @@ static int run(int argc, char **argv) {
   gettimeofday(&start_time, NULL);
 
   if (o.batch) {
-      vmtouch_batch_crawl(ctx);
+      g_crawler->walk_batch(o.batch);
   }
 
-  for (i=0; i<argc; i++) vmtouch_crawl(argv[i], ctx);
+  for (i=0; i<argc; i++) g_crawler->walk(argv[i]);
 
   gettimeofday(&end_time, NULL);
 
@@ -836,8 +601,8 @@ static int run(int argc, char **argv) {
   if (!o.quiet) {
     if (o.output == NULL) {
       if (o.verbose) printf("\n");
-      printf("           Files: %" PRId64 "\n", ctx.total_files);
-      printf("     Directories: %" PRId64 "\n", ctx.total_dirs);
+      printf("           Files: %" PRId64 "\n", g_crawler->total_files());
+      printf("     Directories: %" PRId64 "\n", g_crawler->total_dirs());
       if (o.touch)
         printf("   Touched Pages: %" PRId64 " (%s)\n", s_stats.total_pages, pretty_print_size(total_pages_size));
       else if (o.evict)
@@ -856,7 +621,7 @@ static int run(int argc, char **argv) {
                    o.evict ? "Evicted" :
                              "Resident";
       printf("Files=%" PRId64 " Directories=%" PRId64 " %sPages=%" PRId64 " TotalPages=%" PRId64 " %sSize=%" PRId64 " TotalSize=%" PRId64 " %sPercent=%.3g Elapsed=%.5g\n", 
-       ctx.total_files, ctx.total_dirs, desc, s.total_pages_in_core, s.total_pages, desc, total_pages_in_core_size, total_pages_size, desc, total_pages_in_core_perc, elapsed);
+       g_crawler->total_files(), g_crawler->total_dirs(), desc, s_stats.total_pages_in_core, s_stats.total_pages, desc, total_pages_in_core_size, total_pages_size, desc, total_pages_in_core_perc, elapsed);
     }
   }
 

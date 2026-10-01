@@ -49,6 +49,11 @@ cache::Mode mode_from_options(const Options& o) {
 Session::Session(Options opts, std::unique_ptr<cache::ProgressSink> sink, WarnFn warn)
     : opts_(opts), sink_(std::move(sink)), warn_(std::move(warn)) {}
 
+Session::Session(Options opts, FileFilter filter,
+                 std::unique_ptr<cache::ProgressSink> sink, WarnFn warn)
+    : opts_(opts), sink_(std::move(sink)), warn_(std::move(warn)),
+      filter_(std::move(filter)) {}
+
 Session::~Session() = default;
 
 Status Session::process_file(const std::string& path) {
