@@ -6,7 +6,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(vmtouch_core STATIC
-    src/core/core.cpp
     src/core/platform.cpp
     src/core/filters.cpp
     src/core/cache.cpp
