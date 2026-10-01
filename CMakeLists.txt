@@ -5,7 +5,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(vmtouch_core STATIC src/core/core.cpp)  # module sources added incrementally
+add_library(vmtouch_core STATIC
+    src/core/core.cpp
+    src/core/platform.cpp
+)
 add_executable(vmtouch src/cli/main.cpp)
 target_link_libraries(vmtouch PRIVATE vmtouch_core)
 

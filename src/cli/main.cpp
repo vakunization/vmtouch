@@ -83,6 +83,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #endif
 
 #include "core/common.h"
+#include "core/platform.h"
 
 long pagesize;
 
@@ -110,9 +111,6 @@ struct CrawlContext {
 	char *filename_filter_list[MAX_NUMBER_OF_FILENAME_FILTERS];
 };
 
-Options* o_ptr = nullptr;
-
-
 int number_of_ignores=0;
 int number_of_filename_filters=0;
 
@@ -122,8 +120,10 @@ int exit_pipe[2];
 int daemon_pid;
 
 
-void send_exit_signal(char code) {
-  if (daemon_pid == 0 && o_ptr->wait) {
+// wait is passed explicitly: this must work both in the daemon child (which
+// owns `o`) and from main()'s catch handler without any global Options*.
+void send_exit_signal(const Options& o, char code) {
+  if (daemon_pid == 0 && o.wait) {
     if (write(exit_pipe[1], &code, 1) < 0)
       fprintf(stderr, "vmtouch: FATAL: write: %s", strerror(errno));
   }
@@ -156,6 +156,10 @@ void usage() {
   exit(1);
 }
 
+// Fatal situations no longer exit() here: the library/CLI code throws
+// FatalError and main()'s single handler prints the message, sends the
+// daemon exit signal and exits 1. Message text is byte-identical to the
+// old exit-based fatal().
 static void fatal(const char *fmt, ...) {
   va_list ap;
   char buf[4096];
@@ -164,9 +168,7 @@ static void fatal(const char *fmt, ...) {
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
 
-  fprintf(stderr, "vmtouch: FATAL: %s\n", buf);
-  send_exit_signal(1);
-  exit(1);
+  throw FatalError(buf);
 }
 
 static void warning(const char *fmt, bool quiet, ...) {
@@ -365,40 +367,25 @@ void parse_filename_filter_item(char *inp, char* *filename_filter_list) {
 }
 
 
-int aligned_p(void *p) {
-  return 0 == ((long)p & (pagesize-1));
-}
-
-int is_mincore_page_resident(char p) {
-  return p & 0x1;
-}
-
-
-void increment_nofile_rlimit() {
-  struct rlimit r;
-
-  if (getrlimit(RLIMIT_NOFILE, &r))
-    fatal("increment_nofile_rlimit: getrlimit (%s)", strerror(errno));
-
-  r.rlim_cur = r.rlim_max + 1;
-  r.rlim_max = r.rlim_max + 1;
-
-  if (setrlimit(RLIMIT_NOFILE, &r)) {
-    if (errno == EPERM) {
+// Raises RLIMIT_NOFILE via the platform module and translates the outcome
+// into the exact fatal messages the monolith produced.
+static void increment_nofile_rlimit() {
+  const auto res = platform::raise_nofile_rlimit();
+  switch (res.outcome) {
+    case platform::RaiseNofileResult::Outcome::Raised:
+      return;
+    case platform::RaiseNofileResult::Outcome::GetrlimitFailed:
+      fatal("increment_nofile_rlimit: getrlimit (%s)", strerror(res.err));
+    case platform::RaiseNofileResult::Outcome::PermissionDenied:
       if (getuid() == 0 || geteuid() == 0) fatal("system open file limit reached");
       fatal("open file limit reached and unable to increase limit. retry as root");
-    }
-    fatal("increment_nofile_rlimit: setrlimit (%s)", strerror(errno));
+    case platform::RaiseNofileResult::Outcome::SetrlimitFailed:
+      fatal("increment_nofile_rlimit: setrlimit (%s)", strerror(res.err));
   }
 }
 
-
-
 double gettimeofday_as_double() {
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-
-  return tv.tv_sec + (tv.tv_usec/1000000.0);
+  return platform::now_seconds();
 }
 
 
@@ -414,7 +401,7 @@ void print_page_residency_chart(FILE *out, char *mincore_array, int64_t pages_in
   fprintf(out, "\r[");
 
   for (i=0; i<pages_in_file; i++) {
-    if (is_mincore_page_resident(mincore_array[i])) {
+    if (platform::is_mincore_page_resident(mincore_array[i])) {
       curr++;
       pages_in_core++;
     }
@@ -441,35 +428,7 @@ void print_page_residency_chart(FILE *out, char *mincore_array, int64_t pages_in
 
 
 #ifdef __linux__
-// check if mincore will report correctly, due side-channel vulnerabilities
-// from 5.2+ it only reports if process has write permission to the file
-// https://lwn.net/Articles/778437/
-static int can_do_mincore(struct stat *st) {
-
-  struct utsname utsinfo;
-  if (uname(&utsinfo) == 0) {
-    unsigned long ver[16];
-    int i=0;
-    char *p = utsinfo.release;
-    while (*p) {
-      if (isdigit(*p)) {
-          ver[i] = strtol(p, &p, 10);
-          i++;
-      } else {
-          p++;
-      }
-    }
-    // kernal < 5.2
-    if (ver[0]<5||ver[1]<2)
-      return 1;
-  }
-
-  uid_t uid = getuid();
-  return st->st_uid == uid ||
-         (st->st_gid == getgid() && (st->st_mode&S_IWGRP)) ||
-         (st->st_mode&S_IWOTH) ||
-         uid == 0;
-}
+// Moved verbatim to core/platform.cpp as platform::can_do_mincore().
 #endif
 
 
@@ -558,7 +517,7 @@ void vmtouch_file(char *path, Options& o, TouchContext& tCtx) {
     goto bail;
   }
 
-  if (!aligned_p(mem)) fatal("mmap(%s) wasn't page aligned", path);
+  if (!platform::aligned_p(mem)) fatal("mmap(%s) wasn't page aligned", path);
 
   pages_in_range = bytes2pages(len_of_range);
 
@@ -584,7 +543,7 @@ void vmtouch_file(char *path, Options& o, TouchContext& tCtx) {
     // 3rd arg to mincore is char* on BSD and unsigned char* on linux
     if (mincore(mem, len_of_range, (unsigned char*)mincore_array)) fatal("mincore %s (%s)", path, strerror(errno));
     for (i=0; i<pages_in_range; i++) {
-      if (is_mincore_page_resident(mincore_array[i])) {
+      if (platform::is_mincore_page_resident(mincore_array[i])) {
         tCtx.s.total_pages_in_core++;
       }
     }
@@ -592,7 +551,7 @@ void vmtouch_file(char *path, Options& o, TouchContext& tCtx) {
     if (o.verbose) {
       printf("%s\n", path);
 #ifdef __linux__
-      if (!can_do_mincore(&sb)) {
+      if (!platform::can_do_mincore(sb)) {
         warning("Process does not have write permission, residency chart will not be accurate", o.quiet);
       }
 #endif
@@ -919,17 +878,25 @@ static void write_pidfile(Options& o) {
   }
 }
 
-static void signal_handler_clear_pidfile(int signal_num) {
-  remove_pidfile(*o_ptr);
+// Signal handlers must be void(int), so the pidfile cleanup handler needs
+// one narrow file-scope pointer. It is assigned only here, immediately
+// before sigaction registration, and only when -P is in use — replacing the
+// old never-assigned o_ptr (null deref on every fatal path, caught by UBSan).
+static const Options* g_pidfile_options = nullptr;
+
+static void signal_handler_clear_pidfile(int) {
+  if (g_pidfile_options)
+    remove_pidfile(const_cast<Options&>(*g_pidfile_options));
 }
 
-static void register_signals_for_pidfile() {
+static void register_signals_for_pidfile(const Options& o) {
+  g_pidfile_options = &o;
   struct sigaction sa = {0};
   sa.sa_handler = signal_handler_clear_pidfile;
   if (sigaction(SIGINT, &sa, NULL) < 0 ||
       sigaction(SIGTERM, &sa, NULL) < 0 ||
       sigaction(SIGQUIT, &sa, NULL) < 0) {
-    warning("unable to register signals for pidfile (%s), skipping", o_ptr->quiet, strerror(errno));
+    warning("unable to register signals for pidfile (%s), skipping", o.quiet, strerror(errno));
   }
 }
 
@@ -938,7 +905,7 @@ static void register_signals_for_pidfile() {
 
 
 
-int main(int argc, char **argv) {
+static int run(int argc, char **argv) {
   int ch, i;
   char *prog = argv[0];
   struct timeval start_time;
@@ -954,7 +921,7 @@ int main(int argc, char **argv) {
   if (pipe(exit_pipe))
     fatal("pipe: %s", strerror(errno));
 
-  pagesize = sysconf(_SC_PAGESIZE);
+  platform::init();
 
   while((ch = getopt(argc, argv, "tevqlLdfFh0i:I:p:b:m:P:wo:")) != -1) {
     switch(ch) {
@@ -1045,7 +1012,7 @@ int main(int argc, char **argv) {
     }
 
     if (o.pidfile) {
-      register_signals_for_pidfile();
+      register_signals_for_pidfile(o);
       write_pidfile(o);
     }
 
@@ -1053,7 +1020,7 @@ int main(int argc, char **argv) {
 
     if (o.wait) reopen_all();
 
-    send_exit_signal(0);
+    send_exit_signal(o, 0);
     select(0, NULL, NULL, NULL, NULL);
     exit(0);
   }
@@ -1086,4 +1053,21 @@ int main(int argc, char **argv) {
   }
 
   return 0;
+}
+
+int main(int argc, char **argv) {
+  // Single fatal handler for the whole program: FatalError thrown anywhere
+  // (option parsing, crawl, cache ops) lands here. Byte-identical output to
+  // the old exit-based fatal(): "vmtouch: FATAL: <msg>\n" + daemon exit
+  // signal + status 1.
+  try {
+    return run(argc, argv);
+  } catch (const FatalError& e) {
+    fprintf(stderr, "vmtouch: FATAL: %s\n", e.what());
+    if (daemon_pid == 0 && exit_pipe[1] != -1) {
+      const char code = 1;
+      const ssize_t ignored [[maybe_unused]] = write(exit_pipe[1], &code, 1);
+    }
+    return 1;
+  }
 }
