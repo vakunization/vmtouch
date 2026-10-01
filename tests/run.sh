@@ -191,6 +191,103 @@ printf x >> "$T/long"
 out=$("$VMFILE" -v "$T/short" 2>&1); eq "$(t_of "$out" "$T/short")" 1 "sub-page file: 1 page"
 out=$("$VMFILE" -v "$T/long"  2>&1); eq "$(t_of "$out" "$T/long")"  2 "page+1 byte: 2 pages"
 
+# --- extended characterization coverage (pinned before core extraction) ---
+
+# hardlink dedup: default counts once, -h counts each path
+mk "$T/hl" 3
+ln "$T/hl" "$T/hl2"
+out=$("$VMFILE" -v "$T/hl" "$T/hl2" 2>&1)
+has "$out" "Files: 1" "hardlink dedup: two hardlinks counted as one file"
+out=$("$VMFILE" -v -h "$T/hl" "$T/hl2" 2>&1)
+has "$out" "Files: 2" "-h counts hardlinked copies separately"
+
+# -I: only files matching the filter are processed (directories still traversed)
+out=$("$VMFILE" -v -I '*.log' "$T/d" 2>&1)
+if grep -qF -- "$T/d/a" <<<"$out"; then
+  fail "-I" "non-matching file $T/d/a was processed"
+elif ! grep -qF -- "$T/d/keep.log" <<<"$out"; then
+  fail "-I" "matching file $T/d/keep.log missing"
+else
+  ok "-I: only matching files processed"
+fi
+
+# -m: oversized file counted but its pages skipped, with a warning
+out=$("$VMFILE" -m 1M "$T/big" 2>&1)
+has "$out" "too large" "-m: too-large file warns"
+out=$("$VMFILE" -m 1M -o kv "$T/big" 2>&1)
+has "$out" "Files=1 "      "-m: file still counted"
+has "$out" "TotalPages=0 " "-m: pages not counted"
+
+# -b: batch list file; -0: NUL-delimited batch input
+printf '%s\n' "$T/ten" > "$T/list"
+out=$("$VMFILE" -v -b "$T/list" 2>&1)
+eq "$(t_of "$out" "$T/ten")" 10 "-b reads paths from list file"
+printf '%s\0' "$T/one" "$T/ten" > "$T/list0"
+out=$("$VMFILE" -v -0 -b "$T/list0" 2>&1)
+eq "$(t_of "$out" "$T/ten")" 10 "-b -0 handles NUL-delimited paths"
+
+# invalid option combinations exit 1 with a FATAL message
+for combo in "-t -e" "-e -l" "-l -L" "-q -v" "-w" "-P $T/pf"; do
+  # shellcheck disable=SC2086
+  out=$("$VMFILE" $combo "$T/one" 2>&1); rc=$?
+  if [ "$rc" = 1 ] && grep -qF 'FATAL' <<<"$out"; then
+    ok "invalid combo rejected: $combo"
+  else
+    fail "invalid combo: $combo" "rc=$rc out='${out:0:80}'"
+  fi
+done
+
+# -q suppresses both the summary and warnings
+out=$("$VMFILE" -q "$T/ten" 2>&1); rc_is $? 0 "-q exits 0"
+[ -z "$out" ] && ok   "-q: silent on success" \
+              || fail "-q" "unexpected output: ${out:0:80}"
+out=$("$VMFILE" -q "$T/nonexistent" 2>&1); rc_is $? 0 "-q warnings: exits 0"
+[ -z "$out" ] && ok   "-q: warnings suppressed" \
+              || fail "-q warnings" "unexpected output: ${out:0:80}"
+
+# unreadable file: warns, skipped, exit 0 (skip when running as root)
+if [ "$(id -u)" != 0 ]; then
+  mk "$T/noread" 2
+  chmod 000 "$T/noread"
+  out=$("$VMFILE" -v "$T/noread" 2>&1); rc_is $? 0 "unreadable file exits 0"
+  has "$out" "unable to open" "unreadable file warns and is skipped"
+  chmod 644 "$T/noread"
+else
+  echo "  skip unreadable-file test (running as root)"
+fi
+
+# -p offset beyond EOF: warning, file skipped
+out=$("$VMFILE" -v -p "100M-200M" "$T/ten" 2>&1); rc_is $? 0 "-p beyond EOF exits 0"
+has "$out" "smaller than offset" "-p beyond EOF warns"
+
+# trailing slash: dir still crawled, no double slash in echoed paths
+out=$("$VMFILE" -v "$T/d/" 2>&1); rc_is $? 0 "trailing slash exits 0"
+has "$out" "$T/d/a" "trailing slash: directory still crawled"
+if grep -qF -- "$T/d//" <<<"$out"; then
+  fail "trailing slash" "double slash in echoed path"
+else
+  ok "trailing slash: no double slash"
+fi
+
+# symlink loop with -f: detected, terminates with exit 0.
+# Note: without -h the hardlink-dedup check (dirs have st_nlink>=2) returns
+# silently before the loop check fires — pinned behavior; -h disables dedup
+# so the explicit loop warning is reachable.
+ln -s "$T/d" "$T/d/loop"
+out=$("$VMFILE" -v -f -h "$T/d" 2>&1); rc_is $? 0 "symlink loop exits 0"
+has "$out" "symbolic link loop detected" "symlink loop detected under -f -h"
+ln -s "$T/d" "$T/d/loop2"
+out=$("$VMFILE" -v -f "$T/d/loop2" 2>&1); rc_is $? 0 "symlink-to-dir with -f exits 0"
+has "$out" "$T/d/loop2/a" "-f on symlink-to-dir: follows and lists contents"
+# revisit of d is silent here (dedup, no -h); warning path is pinned by the
+# -f -h case above. Only termination is asserted:
+has "$out" "$T/d/loop2/sub/b" "-f nested traversal terminates"
+out=$("$VMFILE" -v "$T/d/loop2" 2>&1)
+has "$out" "not following symbolic link" "symlink without -f: not followed"
+grep -qF -- "$T/d/loop" <<<"$("$VMFILE" -v -f "$T/d" 2>&1)" \
+  && fail "loop under -f" "infinite traversal" \
+  || ok "loop under -f terminates"
+
 echo
 echo "$PASS passed, $FAIL failed"
 [ $FAIL -eq 0 ]

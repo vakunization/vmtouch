@@ -693,6 +693,25 @@ int compare_func(const void *p1, const void *p2)
   return (kp1->dev > kp2->dev) - (kp1->dev < kp2->dev);
 }
 
+// Fix upstream leak: the tsearch tree of seen dev/ino records was never
+// freed (found by LeakSanitizer once a hardlinked-file test existed).
+static void free_dev_and_inode(void *p) {
+  free(p);
+}
+
+// atexit handlers take no arguments, and tsearch(3) may reallocate the tree
+// root as nodes are added, so add_object() re-syncs this pointer on every
+// insert; free_seen_inodes() runs at process exit via atexit (registered in
+// main).
+static void *g_seen_inodes_tree = NULL;
+
+static void free_seen_inodes(void) {
+  if (g_seen_inodes_tree) {
+    tdestroy(g_seen_inodes_tree, free_dev_and_inode);
+    g_seen_inodes_tree = NULL;
+  }
+}
+
 // add device and inode information to the tree of known inodes
 static inline void add_object (struct stat *st, void*& seen_inodes)
 {
@@ -705,6 +724,8 @@ static inline void add_object (struct stat *st, void*& seen_inodes)
   if (tsearch(newp, &seen_inodes, compare_func) == NULL) {
     fatal("tsearch: out of memory");
   }
+  // keep the atexit hook in sync with the (possibly reallocated) tree root
+  g_seen_inodes_tree = seen_inodes;
 }
 
 
@@ -967,6 +988,7 @@ int main(int argc, char **argv) {
   FileInfo f;
   TouchContext tCtx {s, f};
   CrawlContext ctx {o, tCtx};
+  atexit(free_seen_inodes);
 
   if (pipe(exit_pipe))
     fatal("pipe: %s", strerror(errno));
