@@ -28,9 +28,6 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #define RESIDENCY_CHART_WIDTH 60
 #define CHART_UPDATE_INTERVAL 0.1
 #define MAX_CRAWL_DEPTH 1024
-#define MAX_NUMBER_OF_IGNORES 1024
-#define MAX_NUMBER_OF_FILENAME_FILTERS 1024
-#define MAX_FILENAME_LENGTH 1024
 
 #if defined(__linux__) || (defined(__hpux) && !defined(__LP64__))
 // Make sure off_t is 64 bits on linux and when creating 32bit programs
@@ -84,6 +81,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 
 #include "core/common.h"
 #include "core/platform.h"
+#include "core/filters.h"
 
 long pagesize;
 
@@ -107,12 +105,9 @@ struct CrawlContext {
 	dev_t orig_device = 0;
 	int orig_device_inited = 0;
 
-	char *ignore_list[MAX_NUMBER_OF_IGNORES];
-	char *filename_filter_list[MAX_NUMBER_OF_FILENAME_FILTERS];
+	FileFilter filter;
 };
 
-int number_of_ignores=0;
-int number_of_filename_filters=0;
 
 
 int exit_pipe[2];
@@ -328,42 +323,18 @@ void parse_range(char *inp, FileInfoRange& f) {
 }
 
 
-void parse_ignore_item(char *inp, char** ignore_list) {
-  if (inp == NULL) {
-    return;
-  }
-
-  if (strlen(inp) > MAX_FILENAME_LENGTH) {
-    fatal("too long pattern provided to -i: %s", inp);
-    return;
-  }
-
-  if (number_of_ignores >= MAX_NUMBER_OF_IGNORES) {
-    fatal("too many patterns passed to -i. Max is %d", MAX_NUMBER_OF_IGNORES);
-    return;
-  }
-
-  ignore_list[number_of_ignores] = strdup(inp);
-  number_of_ignores++;
+// -i/-I parsing and matching moved to core/filters.{h,cpp} (FileFilter).
+// These thin wrappers keep the getopt switch unchanged; fatal conditions
+// (too long / too many patterns) are now thrown as FatalError from inside
+// FileFilter with identical message text.
+void parse_ignore_item(const char *inp, FileFilter& f) {
+  if (inp == NULL) return;
+  f.add_ignore(inp);
 }
 
-void parse_filename_filter_item(char *inp, char* *filename_filter_list) {
-  if (inp == NULL) {
-    return;
-  }
-
-  if (strlen(inp) > MAX_FILENAME_LENGTH) {
-    fatal("too long pattern provided to -I: %s", inp);
-    return;
-  }
-
-  if (number_of_filename_filters >= MAX_NUMBER_OF_FILENAME_FILTERS) {
-    fatal("too many patterns passed to -I. Max is %d", MAX_NUMBER_OF_FILENAME_FILTERS);
-    return;
-  }
-
-  filename_filter_list[number_of_filename_filters] = strdup(inp);
-  number_of_filename_filters++;
+void parse_filename_filter_item(const char *inp, FileFilter& f) {
+  if (inp == NULL) return;
+  f.add_filename_filter(inp);
 }
 
 
@@ -648,51 +619,9 @@ static inline void add_object (struct stat *st, void*& seen_inodes)
   g_seen_inodes_tree = seen_inodes;
 }
 
-
-int is_ignored(const char* path, char** ignore_list) {
-  char *path_copy;
-  int match, i;
-
-  if (!number_of_ignores) return 0;
-
-  path_copy = strdup(path);
-  match = 0;
-
-  char *filename = basename(path_copy);
-
-  for (i = 0; i < number_of_ignores; i++) {
-    if (fnmatch(ignore_list[i], filename, 0) == 0) {
-      match = 1;
-      break;
-    }
-  }
-
-  free(path_copy);
-  return match;
-}
-
-
-int is_filename_filtered(const char* path, char** filename_filter_list) {
-  char *path_copy;
-  int match, i;
-
-  if (!number_of_filename_filters) return 1;
-
-  path_copy = strdup(path);
-  match = 0;
-
-  char *filename = basename(path_copy);
-
-  for (i = 0; i < number_of_filename_filters; i++) {
-    if (fnmatch(filename_filter_list[i], filename, 0) == 0) {
-      match = 1;
-      break;
-    }
-  }
-
-  free(path_copy);
-  return match;
-}
+// is_ignored()/is_filename_filtered() moved to FileFilter (core/filters.cpp)
+// which owns both pattern lists — fixing the latent bug where these took the
+// list as a parameter but read the global counters.
 
 
 
@@ -718,7 +647,7 @@ void vmtouch_crawl(char* path, CrawlContext& ctx) {
 
   if (path[tp_path_len-1] == '/' && tp_path_len > 1) path[tp_path_len-1] = '\0'; // prevent ugly double slashes when printing path names
 
-  if (is_ignored(path, ctx.ignore_list)) {
+  if (ctx.filter.is_ignored(path)) {
     return;
   }
 
@@ -812,7 +741,7 @@ void vmtouch_crawl(char* path, CrawlContext& ctx) {
       warning("not following symbolic link %s", ctx.opts.quiet, path);
       return;
     } else if (S_ISREG(sb.st_mode) || S_ISBLK(sb.st_mode)) {
-      if (is_filename_filtered(path, ctx.filename_filter_list)) {
+      if (ctx.filter.is_filename_filtered(path)) {
         ctx.total_files++;
         vmtouch_file(path, ctx.opts, ctx.tCtx);
       }
@@ -939,8 +868,8 @@ static int run(int argc, char **argv) {
       case 'F': o.singlefilesystem = 1; break;
       case 'h': o.ignorehardlinkeduplictes = 1; break;
       case 'p': parse_range(optarg, f); break;
-      case 'i': parse_ignore_item(optarg, ctx.ignore_list); break;
-      case 'I': parse_filename_filter_item(optarg, ctx.filename_filter_list); break;
+      case 'i': parse_ignore_item(optarg, ctx.filter); break;
+      case 'I': parse_filename_filter_item(optarg, ctx.filter); break;
       case 'm': {
         int64_t val = parse_size(optarg);
         o.max_file_size = (size_t) val;
