@@ -83,6 +83,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #include "core/platform.h"
 #include "core/filters.h"
 #include "core/cache.h"
+#include "core/session.h"
 
 long pagesize;
 
@@ -428,68 +429,14 @@ public:
 };
 
 static ChartSink g_chart_sink;
+static std::unique_ptr<Session> g_session;
 
-// Temporary shim (commit 5): keeps the old signature so crawl/main are
-// untouched. It owns open/fstat/checks until Session::process_file takes
-// them over in commit 6; the page work itself now lives in core/cache.
+// Shim: delegates to the Session, which owns open/retry/checks and calls
+// the cache engine. The -p range is synced per call because getopt writes
+// it into tCtx.f after the Session was constructed.
 void vmtouch_file(char *path, Options& o, TouchContext& tCtx) {
-  int fd = -1;
-
-  retry_open:
-
-  int open_flags = O_RDONLY;
-
-#if defined(O_NOATIME)
-  open_flags |= O_NOATIME;
-#endif
-
-  fd = open(path, open_flags, 0);
-
-#if defined(O_NOATIME)
-  if (fd == -1 && errno == EPERM) {
-    open_flags &= ~O_NOATIME;
-    fd = open(path, open_flags, 0);
-  }
-#endif
-
-  if (fd == -1) {
-    if (errno == ENFILE || errno == EMFILE) {
-      increment_nofile_rlimit();
-      goto retry_open;
-    }
-
-    warning("unable to open %s (%s), skipping", o.quiet, path, strerror(errno));
-    return;
-  }
-
-  const int64_t len = tCtx.f.max_len;
-  const int64_t off = tCtx.f.offset;
-
-  cache::FileInfo fi;
-  fi.path = path;
-  fi.fd = fd;
-  fi.offset = off;
-  fi.max_len = len;
-  fi.max_file_size = o.max_file_size;
-  fi.verbose = o.verbose > 0;
-  fi.lockall = o.lockall;
-
-  cache::Mode mode = o.evict ? cache::Mode::Evict
-                   : o.lock  ? cache::Mode::Lock
-                   : o.touch ? cache::Mode::Touch
-                   :           cache::Mode::Query;
-
-  // print_page_residency_chart and its helpers are declared below the old
-  // vmtouch_file body; forward declaration keeps the sink usable here.
-  cache::process_file(fi, mode, tCtx.s,
-                      [&](std::string_view msg) {
-                        // warning(fmt, quiet, ...): the quiet flag comes
-                        // BEFORE the varargs (it is a named parameter).
-                        warning("%s", o.quiet, std::string(msg).c_str());
-                      },
-                      g_chart_sink);
-
-  close(fd);
+  (void)o; (void)tCtx;   // session owns options/stats now; range synced after getopt
+  g_session->process_file(path);
 }
 
 
@@ -762,7 +709,7 @@ static int run(int argc, char **argv) {
   struct timeval end_time;
 
   Options o;
-  Stats s;
+  Stats s;   // pre-session scratch; unused after g_session exists (commit 7 removes)
   FileInfoRange f;
   TouchContext tCtx {s, f};
   CrawlContext ctx {o, tCtx};
@@ -837,6 +784,16 @@ static int run(int argc, char **argv) {
     usage();
   }
 
+  // Session created AFTER option parsing/validation so it holds the final
+  // Options; owns the ChartSink and the warning printer (quiet handled
+  // inside Session::warning).
+  g_session = std::make_unique<Session>(o, std::make_unique<ChartSink>(),
+      [](std::string_view msg) {
+        fprintf(stderr, "vmtouch: WARNING: %.*s\n",
+                static_cast<int>(msg.size()), msg.data());
+      });
+  g_session->set_range(f);
+
   // Must be done now because mlock() not inherited across fork()
   if (o.daemon) go_daemon(o);
 
@@ -850,9 +807,10 @@ static int run(int argc, char **argv) {
 
   gettimeofday(&end_time, NULL);
 
-  int64_t total_pages_in_core_size = s.total_pages_in_core * pagesize;
-  int64_t total_pages_size         = s.total_pages * pagesize;
-  double  total_pages_in_core_perc = 100.0 * s.total_pages_in_core / s.total_pages;
+  const Stats& s_stats = g_session->stats();   // session is the single source of truth now
+  int64_t total_pages_in_core_size = s_stats.total_pages_in_core * pagesize;
+  int64_t total_pages_size         = s_stats.total_pages * pagesize;
+  double  total_pages_in_core_perc = 100.0 * s_stats.total_pages_in_core / s_stats.total_pages;
   double  elapsed                  = (end_time.tv_sec - start_time.tv_sec) + (double)(end_time.tv_usec - start_time.tv_usec)/1000000.0;
 
   if (o.lock || o.lockall) {
@@ -866,7 +824,7 @@ static int run(int argc, char **argv) {
       write_pidfile(o);
     }
 
-    if (!o.quiet) printf("LOCKED %" PRId64 " pages (%s)\n", s.total_pages, pretty_print_size(total_pages_size));
+    if (!o.quiet) printf("LOCKED %" PRId64 " pages (%s)\n", s_stats.total_pages, pretty_print_size(total_pages_size));
 
     if (o.wait) reopen_all();
 
@@ -881,14 +839,14 @@ static int run(int argc, char **argv) {
       printf("           Files: %" PRId64 "\n", ctx.total_files);
       printf("     Directories: %" PRId64 "\n", ctx.total_dirs);
       if (o.touch)
-        printf("   Touched Pages: %" PRId64 " (%s)\n", s.total_pages, pretty_print_size(total_pages_size));
+        printf("   Touched Pages: %" PRId64 " (%s)\n", s_stats.total_pages, pretty_print_size(total_pages_size));
       else if (o.evict)
-        printf("   Evicted Pages: %" PRId64 " (%s)\n", s.total_pages, pretty_print_size(total_pages_size));
+        printf("   Evicted Pages: %" PRId64 " (%s)\n", s_stats.total_pages, pretty_print_size(total_pages_size));
       else {
-        printf("  Resident Pages: %" PRId64 "/%" PRId64 "  ", s.total_pages_in_core, s.total_pages);
+        printf("  Resident Pages: %" PRId64 "/%" PRId64 "  ", s_stats.total_pages_in_core, s_stats.total_pages);
         printf("%s/", pretty_print_size(total_pages_in_core_size));
         printf("%s  ", pretty_print_size(total_pages_size));
-        if (s.total_pages)
+        if (s_stats.total_pages)
           printf("%.3g%%", total_pages_in_core_perc);
         printf("\n");
       }

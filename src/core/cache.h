@@ -62,12 +62,14 @@ public:
                               int64_t pages_resident) = 0;
 };
 
-// Warning seam until Session (commit 6) owns it: message text is passed
-// verbatim; the CLI installs a printer honoring -q.
-using WarnFn = std::function<void(std::string_view msg)>;
-
-// Result of processing one file region.
-enum class Status { Ok = 0, Skipped = 1 };   // Skipped: warning already emitted
+// No-op sink: for embedders/tests (and Session when no sink is installed).
+class NullSink final : public ProgressSink {
+public:
+    void on_file_start(std::string_view) override {}
+    void on_evicting(std::string_view) override {}
+    void on_chart(std::span<const unsigned char>, int64_t) override {}
+    void on_file_done(std::string_view, int64_t, int64_t) override {}
+};
 
 // Process one file region according to mode.
 //  * Lock mode intentionally skips munmap (upstream mlockall semantics);

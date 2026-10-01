@@ -10,7 +10,9 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <functional>
 #include <stdexcept>
+#include <string_view>
 
 #include <sys/types.h>   // dev_t, ino_t
 
@@ -54,7 +56,7 @@ struct FileInfoRange {
     int64_t max_len = 0;
 };
 
-// Result codes returned by core entry points (used from commit 3 on).
+// Result codes returned by core entry points (cache/session).
 enum class Status {
     Ok = 0,        // file/directory processed
     Skipped = 1,   // not processed; a warning was already emitted (or silence is correct)
@@ -68,6 +70,12 @@ class FatalError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
+
+// Warning seam (the "Diagnostics folded into Session" decision): the
+// library never prints to stderr; the installer decides where warnings go.
+// Quiet (-q) handling lives with the owner of the options — Session::warning
+// checks it before invoking the callback.
+using WarnFn = std::function<void(std::string_view msg)>;
 
 struct Stats {
     int64_t total_pages = 0;
