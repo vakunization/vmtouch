@@ -12,6 +12,10 @@
 
 #include "common.h"
 
+// Definition of the global declared in core/common.h. Lives in the library
+// (not the CLI) so the core links standalone. Set by platform::init().
+long pagesize = 4096;
+
 namespace platform {
 
 void init() {

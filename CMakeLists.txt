@@ -15,7 +15,7 @@ add_library(vmtouch_core STATIC
 add_executable(vmtouch src/cli/main.cpp)
 target_link_libraries(vmtouch PRIVATE vmtouch_core)
 
-target_include_directories(vmtouch_core PUBLIC src)
+target_include_directories(vmtouch_core PUBLIC src tests)
 target_include_directories(vmtouch PRIVATE src)
 
 target_compile_options(vmtouch PRIVATE -Wall -Wextra)
@@ -24,10 +24,9 @@ target_compile_options(vmtouch_core PRIVATE -Wall -Wextra)
 option(VMFTOUCH_SANITIZE "Build with ASan+UBSan" OFF)
 if(VMFTOUCH_SANITIZE)
     set(SANITIZE_FLAGS -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
-    target_compile_options(vmtouch PRIVATE ${SANITIZE_FLAGS})
-    target_link_options(vmtouch PRIVATE ${SANITIZE_FLAGS})
-    target_compile_options(vmtouch_core PRIVATE ${SANITIZE_FLAGS})
-    target_link_options(vmtouch_core PRIVATE ${SANITIZE_FLAGS})
+    set(SANITIZE_TARGETS vmtouch vmtouch_core unit_tests)
+else()
+    set(SANITIZE_TARGETS "")
 endif()
 
 include(GNUInstallDirs)
@@ -36,9 +35,27 @@ install(TARGETS vmtouch
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
+# --- unit tests (dependency-free harness in tests/unit/) -----------------
+add_executable(unit_tests
+    tests/unit/main.cpp
+    tests/unit/test_platform.cpp
+    tests/unit/test_filters.cpp
+)
+target_link_libraries(unit_tests PRIVATE vmtouch_core)
+target_include_directories(unit_tests PRIVATE src tests)
+
+if(VMFTOUCH_SANITIZE)
+    foreach(t ${SANITIZE_TARGETS})
+        target_compile_options(${t} PRIVATE ${SANITIZE_FLAGS})
+        target_link_options(${t} PRIVATE ${SANITIZE_FLAGS})
+    endforeach()
+endif()
+
 enable_testing()
 add_test(NAME characterization
     COMMAND ${CMAKE_SOURCE_DIR}/tests/run.sh
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 set_tests_properties(characterization PROPERTIES ENVIRONMENT "VMFILE=$<TARGET_FILE:vmtouch>")
+
+add_test(NAME unit COMMAND unit_tests)

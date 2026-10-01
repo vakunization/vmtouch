@@ -78,8 +78,6 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #include "core/session.h"
 #include "core/crawl.h"
 
-long pagesize;
-
 
 
 
