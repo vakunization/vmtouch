@@ -40,8 +40,6 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 // Required for mincore() on some linux systems
 #define _DEFAULT_SOURCE
 #define _BSD_SOURCE
-// for O_NOATIME
-#define _GNU_SOURCE
 #endif
 
 #include <stdio.h>
@@ -57,18 +55,13 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/time.h>
-#include <sys/resource.h>
-#include <sys/mman.h>
+#include <sys/mman.h>   // mlockall
 #include <sys/wait.h>
 #include <limits.h>
 #include <inttypes.h>
-#include <dirent.h>
 #include <errno.h>
+#include <math.h>      // HUGE_VAL in parse_size
 #include <fcntl.h>
-#include <math.h>
-#include <search.h>
-#include <libgen.h>
-#include <fnmatch.h>
 
 #if defined(__linux__)
 // Used to find size of block devices
@@ -146,13 +139,15 @@ static void fatal(const char *fmt, ...) {
   throw FatalError(buf);
 }
 
-// Old vararg warning: the quiet flag must be the SECOND arg. Kept until
-// commit 6 moves the quiet handling into Session's warning helper.
+// Old vararg warning kept for CLI-side messages (pidfile/signal paths).
+// The quiet flag is a NAMED parameter, so it must be passed BEFORE the
+// varargs; va_start on it (not fmt) is what makes vsnprintf read the
+// format arguments correctly.
 static void warning(const char *fmt, bool quiet, ...) {
   va_list ap;
   char buf[4096];
 
-  va_start(ap, fmt);
+  va_start(ap, quiet);
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
 
@@ -270,10 +265,6 @@ int64_t parse_size(char *inp) {
   return (int64_t) val;
 }
 
-int64_t bytes2pages(int64_t bytes) {
-  return (bytes+pagesize-1) / pagesize;
-}
-
 void parse_range(char *inp, FileInfoRange& f) {
   char *token;
   int64_t upper_range=0;
@@ -319,27 +310,6 @@ void parse_filename_filter_item(const char *inp, FileFilter& f) {
   f.add_filename_filter(inp);
 }
 
-
-// Raises RLIMIT_NOFILE via the platform module and translates the outcome
-// into the exact fatal messages the monolith produced.
-static void increment_nofile_rlimit() {
-  const auto res = platform::raise_nofile_rlimit();
-  switch (res.outcome) {
-    case platform::RaiseNofileResult::Outcome::Raised:
-      return;
-    case platform::RaiseNofileResult::Outcome::GetrlimitFailed:
-      fatal("increment_nofile_rlimit: getrlimit (%s)", strerror(res.err));
-    case platform::RaiseNofileResult::Outcome::PermissionDenied:
-      if (getuid() == 0 || geteuid() == 0) fatal("system open file limit reached");
-      fatal("open file limit reached and unable to increase limit. retry as root");
-    case platform::RaiseNofileResult::Outcome::SetrlimitFailed:
-      fatal("increment_nofile_rlimit: setrlimit (%s)", strerror(res.err));
-  }
-}
-
-double gettimeofday_as_double() {
-  return platform::now_seconds();
-}
 
 
 
@@ -424,7 +394,7 @@ static void remove_pidfile(Options& o) {
 
 static void write_pidfile(Options& o) {
   FILE *f = NULL;
-  size_t wrote = 0;
+
 
   f = fopen(o.pidfile, "w");
   if (!f) {
@@ -432,7 +402,7 @@ static void write_pidfile(Options& o) {
     return;
   }
 
-  wrote = fprintf(f, "%d\n", getpid());
+  const ssize_t wrote = fprintf(f, "%d\n", getpid());
 
   fclose(f);
 
@@ -455,7 +425,7 @@ static void signal_handler_clear_pidfile(int) {
 
 static void register_signals_for_pidfile(const Options& o) {
   g_pidfile_options = &o;
-  struct sigaction sa = {0};
+  struct sigaction sa = {};
   sa.sa_handler = signal_handler_clear_pidfile;
   if (sigaction(SIGINT, &sa, NULL) < 0 ||
       sigaction(SIGTERM, &sa, NULL) < 0 ||
