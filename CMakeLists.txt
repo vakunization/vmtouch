@@ -9,6 +9,9 @@ add_library(vmtouch_core STATIC src/core/core.cpp)  # module sources added incre
 add_executable(vmtouch src/cli/main.cpp)
 target_link_libraries(vmtouch PRIVATE vmtouch_core)
 
+target_include_directories(vmtouch_core PUBLIC src)
+target_include_directories(vmtouch PRIVATE src)
+
 target_compile_options(vmtouch PRIVATE -Wall -Wextra)
 target_compile_options(vmtouch_core PRIVATE -Wall -Wextra)
 

@@ -25,7 +25,6 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 ***********************************************************************/
 
 
-#define VMTOUCH_VERSION "1.3.1"
 #define RESIDENCY_CHART_WIDTH 60
 #define CHART_UPDATE_INTERVAL 0.1
 #define MAX_CRAWL_DEPTH 1024
@@ -83,51 +82,13 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #include <sys/utsname.h>
 #endif
 
-/*
- * To find out if the stat results from a single file correspond to a file we
- * have already seen, we need to compare both the device and the inode
- */
-struct dev_and_inode
-{
-    dev_t dev;
-    ino_t ino;
-};
+#include "core/common.h"
 
 long pagesize;
 
-struct Options {
-	bool touch = 0;
-	bool evict = 0;
-	bool quiet = 0;
-	int verbose = 0;
-	bool lock = 0;
-	bool lockall = 0;
-	bool daemon = 0;
-	bool followsymlinks = 0;
-	bool singlefilesystem = 0;
-	bool ignorehardlinkeduplictes = 0;
-	size_t max_file_size = SIZE_MAX;
-	bool wait = 0;
-	char *batch = NULL;
-	char *pidfile = NULL;
-	char *output = NULL;
-	int zero_delim = 0;
-};
-
-struct FileInfo {
-	char* path = nullptr;
-	int64_t offset = 0;
-	int64_t max_len = 0;
-};
-
-struct Stats {
-	int64_t total_pages = 0;
-	int64_t total_pages_in_core = 0;
-};
-
 struct TouchContext {
 	Stats& s;
-	FileInfo& f;
+	FileInfoRange& f;
 };
 
 struct CrawlContext {
@@ -334,7 +295,7 @@ int64_t bytes2pages(int64_t bytes) {
   return (bytes+pagesize-1) / pagesize;
 }
 
-void parse_range(char *inp, FileInfo& f) {
+void parse_range(char *inp, FileInfoRange& f) {
   char *token;
   int64_t upper_range=0;
   int64_t lower_range=0;
@@ -985,7 +946,7 @@ int main(int argc, char **argv) {
 
   Options o;
   Stats s;
-  FileInfo f;
+  FileInfoRange f;
   TouchContext tCtx {s, f};
   CrawlContext ctx {o, tCtx};
   atexit(free_seen_inodes);
