@@ -82,6 +82,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #include "core/common.h"
 #include "core/platform.h"
 #include "core/filters.h"
+#include "core/cache.h"
 
 long pagesize;
 
@@ -166,6 +167,8 @@ static void fatal(const char *fmt, ...) {
   throw FatalError(buf);
 }
 
+// Old vararg warning: the quiet flag must be the SECOND arg. Kept until
+// commit 6 moves the quiet handling into Session's warning helper.
 static void warning(const char *fmt, bool quiet, ...) {
   va_list ap;
   char buf[4096];
@@ -403,20 +406,38 @@ void print_page_residency_chart(FILE *out, char *mincore_array, int64_t pages_in
 #endif
 
 
+// CLI-side ProgressSink: renders sink calls exactly as the monolith printed
+// them, keeping -v output byte-identical (tests/run.sh parses it).
+void print_page_residency_chart(FILE *out, char *mincore_array, int64_t pages_in_file); // fwd: defined below
+
+class ChartSink final : public cache::ProgressSink {
+public:
+  void on_file_start(std::string_view path) override {
+    printf("%.*s\n", static_cast<int>(path.size()), path.data());
+  }
+  void on_evicting(std::string_view path) override {
+    printf("Evicting %.*s\n", static_cast<int>(path.size()), path.data());
+  }
+  void on_chart(std::span<const unsigned char> pages, int64_t pages_in_file) override {
+    print_page_residency_chart(stdout,
+        const_cast<char*>(reinterpret_cast<const char*>(pages.data())), pages_in_file);
+  }
+  void on_file_done(std::string_view, int64_t, int64_t) override {
+    printf("\n");   // was the trailing printf("\n") of the verbose block
+  }
+};
+
+static ChartSink g_chart_sink;
+
+// Temporary shim (commit 5): keeps the old signature so crawl/main are
+// untouched. It owns open/fstat/checks until Session::process_file takes
+// them over in commit 6; the page work itself now lives in core/cache.
 void vmtouch_file(char *path, Options& o, TouchContext& tCtx) {
   int fd = -1;
-  void *mem = NULL;
-  struct stat sb;
-  int64_t len_of_file=0;
-  int64_t len_of_range=0;
-  int64_t pages_in_range;
-  int i;
-  int res;
-  int open_flags;
 
   retry_open:
 
-  open_flags = O_RDONLY;
+  int open_flags = O_RDONLY;
 
 #if defined(O_NOATIME)
   open_flags |= O_NOATIME;
@@ -438,137 +459,37 @@ void vmtouch_file(char *path, Options& o, TouchContext& tCtx) {
     }
 
     warning("unable to open %s (%s), skipping", o.quiet, path, strerror(errno));
-    goto bail;
+    return;
   }
 
-  res = fstat(fd, &sb);
+  const int64_t len = tCtx.f.max_len;
+  const int64_t off = tCtx.f.offset;
 
-  if (res) {
-    warning("unable to fstat %s (%s), skipping", o.quiet, path, strerror(errno));
-    goto bail;
-  }
+  cache::FileInfo fi;
+  fi.path = path;
+  fi.fd = fd;
+  fi.offset = off;
+  fi.max_len = len;
+  fi.max_file_size = o.max_file_size;
+  fi.verbose = o.verbose > 0;
+  fi.lockall = o.lockall;
 
-  if (S_ISBLK(sb.st_mode)) {
-#if defined(__linux__)
-    if (ioctl(fd, BLKGETSIZE64, &len_of_file)) {
-      warning("unable to ioctl %s (%s), skipping", o.quiet, path, strerror(errno));
-      goto bail;
-    }
-#else
-    fatal("discovering size of block devices not (yet?) supported on this platform");
-#endif
-  } else {
-    len_of_file = sb.st_size;
-  }
+  cache::Mode mode = o.evict ? cache::Mode::Evict
+                   : o.lock  ? cache::Mode::Lock
+                   : o.touch ? cache::Mode::Touch
+                   :           cache::Mode::Query;
 
+  // print_page_residency_chart and its helpers are declared below the old
+  // vmtouch_file body; forward declaration keeps the sink usable here.
+  cache::process_file(fi, mode, tCtx.s,
+                      [&](std::string_view msg) {
+                        // warning(fmt, quiet, ...): the quiet flag comes
+                        // BEFORE the varargs (it is a named parameter).
+                        warning("%s", o.quiet, std::string(msg).c_str());
+                      },
+                      g_chart_sink);
 
-  if (len_of_file == 0) {
-    goto bail;
-  }
-
-  if (len_of_file > o.max_file_size) {
-    warning("file %s too large, skipping", o.quiet, path);
-    goto bail;
-  }
-
-
-  if (tCtx.f.max_len > 0 && (tCtx.f.offset + tCtx.f.max_len) < len_of_file) {
-    len_of_range = tCtx.f.max_len;
-  } else if (tCtx.f.offset >= len_of_file) {
-    warning("file %s smaller than offset, skipping", o.quiet, path);
-    goto bail;
-  } else {
-    len_of_range = len_of_file -tCtx.f.offset;
-  }
-
-  mem = mmap(NULL, len_of_range, PROT_READ, MAP_SHARED, fd, tCtx.f.offset);
-
-  if (mem == MAP_FAILED) {
-    warning("unable to mmap file %s (%s), skipping", o.quiet, path, strerror(errno));
-    goto bail;
-  }
-
-  if (!platform::aligned_p(mem)) fatal("mmap(%s) wasn't page aligned", path);
-
-  pages_in_range = bytes2pages(len_of_range);
-
-  tCtx.s.total_pages += pages_in_range;
-
-  if (o.evict) {
-    if (o.verbose) printf("Evicting %s\n", path);
-
-#if defined(__linux__) || defined(__hpux)
-    if (posix_fadvise(fd, tCtx.f.offset, len_of_range, POSIX_FADV_DONTNEED))
-      warning("unable to posix_fadvise file %s (%s)", o.quiet, path, strerror(errno));
-#elif defined(__FreeBSD__) || defined(__sun__) || defined(__APPLE__)
-    if (msync(mem, len_of_range, MS_INVALIDATE))
-      warning("unable to msync invalidate file %s (%s)", o, path, strerror(errno));
-#else
-    fatal("cache eviction not (yet?) supported on this platform");
-#endif
-  } else {
-    double last_chart_print_time=0.0, temp_time;
-    char *mincore_array = (char*)malloc(pages_in_range);
-    if (mincore_array == NULL) fatal("Failed to allocate memory for mincore array (%s)", strerror(errno));
-
-    // 3rd arg to mincore is char* on BSD and unsigned char* on linux
-    if (mincore(mem, len_of_range, (unsigned char*)mincore_array)) fatal("mincore %s (%s)", path, strerror(errno));
-    for (i=0; i<pages_in_range; i++) {
-      if (platform::is_mincore_page_resident(mincore_array[i])) {
-        tCtx.s.total_pages_in_core++;
-      }
-    }
-
-    if (o.verbose) {
-      printf("%s\n", path);
-#ifdef __linux__
-      if (!platform::can_do_mincore(sb)) {
-        warning("Process does not have write permission, residency chart will not be accurate", o.quiet);
-      }
-#endif
-      last_chart_print_time = gettimeofday_as_double();
-      print_page_residency_chart(stdout, mincore_array, pages_in_range);
-    }
-
-    if (o.touch) {
-      volatile uint64_t j = 0;
-      for (i=0; i<pages_in_range; i++) {
-        j += ((char*)mem)[i*pagesize];
-        mincore_array[i] = 1;
-
-        if (o.verbose) {
-          temp_time = gettimeofday_as_double();
-
-          if (temp_time > (last_chart_print_time+CHART_UPDATE_INTERVAL)) {
-            last_chart_print_time = temp_time;
-            print_page_residency_chart(stdout, mincore_array, pages_in_range);
-          }
-        }
-      }
-    }
-
-    if (o.verbose) {
-      print_page_residency_chart(stdout, mincore_array, pages_in_range);
-      printf("\n");
-    }
-
-    free(mincore_array);
-  }
-
-  if (o.lock) {
-    if (mlock(mem, len_of_range))
-      fatal("mlock: %s (%s)", path, strerror(errno));
-  }
-
-  bail:
-
-  if (!o.lock && !o.lockall && mem) {
-    if (munmap(mem, len_of_range)) warning("unable to munmap file %s (%s)", o.quiet, path, strerror(errno));
-  }
-
-  if (fd != -1) {
-    close(fd);
-  }
+  close(fd);
 }
 
 
