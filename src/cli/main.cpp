@@ -383,6 +383,38 @@ static std::unique_ptr<Crawler> g_crawler;
 
 
 
+// Batch driver (-b): reads paths separated by newline or NUL (-0) from a
+// list file or stdin ("-") and walks each. This is input-driving, i.e. a
+// CLI concern: the library only ever sees walk() per path. Deliberately
+// kept OUT of src/core (no fopen under core — success criterion).
+static void walk_batch(Crawler& crawler, const Options& o) {
+  FILE* f;
+  char* line = NULL;
+  size_t len = 0;
+  ssize_t read;
+  int delim = o.zero_delim ? '\0' : '\n';
+
+  if (!strcmp(o.batch, "-")) {
+    f = stdin;
+  } else {
+    f = fopen(o.batch, "r");
+    if (!f) {
+      fprintf(stderr, "vmtouch: WARNING: unable to open %s (%s), skipping\n",
+              o.batch, strerror(errno));
+      return;
+    }
+  }
+
+  while ((read = getdelim(&line, &len, delim, f)) != -1) {
+    line[read - 1] = '\0';   // strip the delimiter
+    crawler.walk(line);
+  }
+
+  free(line);
+  if (f != stdin)
+    fclose(f);
+}
+
 static void remove_pidfile(Options& o) {
   int res = 0;
 
@@ -535,7 +567,7 @@ static int run(int argc, char **argv) {
   gettimeofday(&start_time, NULL);
 
   if (o.batch) {
-      g_crawler->walk_batch(o.batch);
+      walk_batch(*g_crawler, o);
   }
 
   for (i=0; i<argc; i++) g_crawler->walk(argv[i]);

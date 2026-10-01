@@ -34,21 +34,16 @@ public:
 
     // Traverses one path (file, directory, or symlink per options).
     // Takes the path BY VALUE: the parameter is this frame's private
-    // mutable copy, replacing the C hack of mutating a shared buffer to
-    // strip the trailing '/'. Recursion passes child paths the same way.
+    // mutable copy — used to strip the trailing '/' exactly like the C
+    // original mutated its buffer. Recursion passes child copies the same
+    // way, so no shared mutable state exists anywhere.
     void walk(std::string path);
-
-    // Batch driver (from -b): reads paths separated by newline or NUL
-    // (options().zero_delim) from a list file or stdin ("-") and walks each.
-    void walk_batch(const std::string& list_path);
 
     // Totals for the summary. (Pages live in Session::stats().)
     int64_t total_files() const { return state_.total_files; }
     int64_t total_dirs() const { return state_.total_dirs; }
 
 private:
-    void walk_impl(std::string& path);
-
     struct State {
         int64_t total_files = 0;
         int64_t total_dirs = 0;

@@ -47,10 +47,6 @@ Crawler::~Crawler() {
 }
 
 void Crawler::walk(std::string path) {
-    walk_impl(path);
-}
-
-void Crawler::walk_impl(std::string& path) {
     struct stat sb;
     char npath[PATH_MAX];
 
@@ -165,8 +161,7 @@ void Crawler::walk_impl(std::string& path) {
             }
 
             state_.curr_crawl_depth++;
-            std::string child(npath);   // recursion: child gets its own path copy
-            walk_impl(child);
+            walk(std::string(npath));   // recursion: child gets its own path copy
             state_.curr_crawl_depth--;
         }
 
@@ -182,34 +177,4 @@ void Crawler::walk_impl(std::string& path) {
     } else {
         session_.warning("skipping non-regular file: " + path);
     }
-}
-
-void Crawler::walk_batch(const std::string& list_path) {
-    FILE* f;
-    char* line = NULL;
-    size_t len = 0;
-    ssize_t read;
-    const Options& opts = session_.options();
-    int delim = opts.zero_delim ? '\0' : '\n';
-
-    if (!strcmp(opts.batch, "-")) {
-        f = stdin;
-    } else {
-        f = fopen(opts.batch, "r");
-        if (!f) {
-            session_.warning("unable to open " + std::string(opts.batch) + " (" +
-                             strerror(errno) + "), skipping");
-            return;
-        }
-    }
-
-    while ((read = getdelim(&line, &len, delim, f)) != -1) {
-        // strip the delimiter character
-        line[read - 1] = '\0';
-        walk(line);
-    }
-
-    free(line);
-    if (f != stdin)
-        fclose(f);
 }
