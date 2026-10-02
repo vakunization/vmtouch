@@ -163,7 +163,6 @@ make_session(std::shared_ptr<SharedSinkState> state, WarningCapture& warn,
                      // on the verbose flag (CLI coupling — Phase 3 agenda)
     auto s = std::make_unique<Session>(
         o,
-        FileFilter{},
         std::make_unique<SharedSink>(std::move(state)));
     s->set_range(range);
     return s;
@@ -178,7 +177,6 @@ make_session(std::shared_ptr<SharedSinkState> state, WarningCapture& warn,
     if (o.verbose == 0) o.verbose = 1;   // same per-file-numbers default as above
     auto s = std::make_unique<Session>(
         o,
-        FileFilter{},
         std::make_unique<SharedSink>(std::move(state)));
     s->set_range(range);
     return s;

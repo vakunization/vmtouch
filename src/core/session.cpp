@@ -77,9 +77,8 @@ struct Session::PathBoundEvents final : public cache::EngineEvents {
     }
 };
 
-Session::Session(Options opts, FileFilter filter,
-                 std::unique_ptr<cache::ProgressSink> sink)
-    : opts_(opts), sink_(std::move(sink)), filter_(std::move(filter)),
+Session::Session(Options opts, std::unique_ptr<cache::ProgressSink> sink)
+    : opts_(std::move(opts)), sink_(std::move(sink)),
       crawler_(std::make_unique<Crawler>(*this)) {}
 
 Session::~Session() = default;

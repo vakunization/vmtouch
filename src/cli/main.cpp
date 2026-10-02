@@ -342,18 +342,17 @@ void parse_range(char *inp, FileInfoRange& f) {
 }
 
 
-// -i/-I parsing and matching moved to core/filters.{h,cpp} (FileFilter).
-// These thin wrappers keep the getopt switch unchanged; fatal conditions
-// (too long / too many patterns) are now thrown as FatalError from inside
-// FileFilter with identical message text.
-void parse_ignore_item(const char *inp, FileFilter& f) {
+// -i/-I parsing (A4): patterns are plain lists on Options; the fatal caps
+// (too long / too many patterns) live in filters::add_* with identical
+// message text.
+void parse_ignore_item(const char *inp, Options& o) {
   if (inp == NULL) return;
-  f.add_ignore(inp);
+  filters::add_ignore(o.ignore, inp);
 }
 
-void parse_filename_filter_item(const char *inp, FileFilter& f) {
+void parse_filename_filter_item(const char *inp, Options& o) {
   if (inp == NULL) return;
-  f.add_filename_filter(inp);
+  filters::add_include(o.include, inp);
 }
 
 
@@ -525,7 +524,6 @@ static int run(int argc, char **argv) {
 
   Options o;
   FileInfoRange f;
-  FileFilter cli_filter;   // filled during getopt, ownership moves into Session
 
   if (pipe(exit_pipe))
     fatal("pipe: %s", strerror(errno));
@@ -548,8 +546,8 @@ static int run(int argc, char **argv) {
       case 'F': o.singlefilesystem = 1; break;
       case 'h': o.ignorehardlinkeduplictes = 1; break;
       case 'p': parse_range(optarg, f); break;
-      case 'i': parse_ignore_item(optarg, cli_filter); break;
-      case 'I': parse_filename_filter_item(optarg, cli_filter); break;
+      case 'i': parse_ignore_item(optarg, o); break;
+      case 'I': parse_filename_filter_item(optarg, o); break;
       case 'm': {
         int64_t val = parse_size(optarg);
         o.max_file_size = (size_t) val;
@@ -600,7 +598,7 @@ static int run(int argc, char **argv) {
   // Options; owns the ChartSink. Failures are recorded as structured data
   // (A1); this formatter converts records to the historical text at print
   // time — the exact wording the monolith emitted.
-  g_session = std::make_unique<Session>(o, std::move(cli_filter), std::make_unique<ChartSink>());
+  g_session = std::make_unique<Session>(o, std::make_unique<ChartSink>());
   g_session->set_range(f);   // -p range applied to the session (used per file)
   // A2: no more WarnFn parameter — failures are structured records, drained
   // and formatted below (drain_failures). A3: the crawler is internal —

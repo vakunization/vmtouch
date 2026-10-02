@@ -150,8 +150,8 @@ TEST(crawl_ignore_pattern_removes_files_and_dirs) {
     tree.mkfile("keep.log", 1);
 
     CrawlFixture fx;
-    fx.session->filter().add_ignore("*.tmp");
-    fx.session->filter().add_ignore("skip");
+    fx.session->options().ignore.push_back("*.tmp");   // A4: lists on Options
+    fx.session->options().ignore.push_back("skip");
     fx.crawler->walk(tree.path);
 
     EXPECT_EQ(fx.crawler->total_files(), 2);     // keep/f and keep.log
@@ -168,7 +168,7 @@ TEST(crawl_filename_filter_keeps_only_matching) {
     tree.mkfile("d/drop.bin", 1);
 
     CrawlFixture fx;
-    fx.session->filter().add_filename_filter("*.log");
+    fx.session->options().include.push_back("*.log");
     fx.crawler->walk(tree.path);
 
     EXPECT_EQ(fx.crawler->total_files(), 1);

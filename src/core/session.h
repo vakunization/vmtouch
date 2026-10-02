@@ -9,8 +9,9 @@
 //   failures()               — structured failure records (A1)
 //
 // Ownership: the application owns the Session; the Session owns Stats,
-// FileFilter, the ProgressSink, the kept regions (-l/-L mappings stay
-// alive for process lifetime) and the traversal state (A3).
+// the ProgressSink, the kept regions (-l/-L mappings stay alive for
+// process lifetime) and the traversal state (A3). Filter policy lives on
+// Options (A4) — the Session holds no filter state.
 
 #pragma once
 
@@ -20,14 +21,13 @@
 
 #include "common.h"
 #include "cache.h"
-#include "filters.h"
 #include "crawl.h"
 
 class Session {
 public:
     // sink may be null (no verbose output).
-    Session(Options opts, FileFilter filter,
-            std::unique_ptr<cache::ProgressSink> sink);
+    // A4: filter policy travels inside Options — no separate filter arg.
+    Session(Options opts, std::unique_ptr<cache::ProgressSink> sink);
     ~Session();
 
     Session(const Session&) = delete;
@@ -65,7 +65,7 @@ public:
     const Stats& stats() const { return stats_; }
     Stats& stats() { return stats_; }
     const Options& options() const { return opts_; }
-    FileFilter& filter() { return filter_; }
+    Options& options() { return opts_; }   // A4: tests/CLI mutate filter lists pre-walk
     cache::ProgressSink* sink() const { return sink_.get(); }
     const FileInfoRange& range() const { return range_; }
     void set_range(const FileInfoRange& r) { range_ = r; }   // CLI applies -p here
@@ -73,7 +73,6 @@ public:
 private:
     Options opts_;
     std::unique_ptr<cache::ProgressSink> sink_;
-    FileFilter filter_;
     Stats stats_;
     FileInfoRange range_;
     std::vector<Failure> failures_;

@@ -3,6 +3,7 @@
 #include "crawl.h"
 
 #include "session.h"
+#include "filters.h"
 
 #include <cerrno>
 #include <cstdlib>
@@ -53,7 +54,6 @@ void Crawler::walk(std::string path) {
     char npath[PATH_MAX];
 
     const Options& opts = session_.options();
-    const FileFilter& filter = session_.filter();
 
     // prevent ugly double slashes when printing path names (verbatim;
     // path is this frame's private copy)
@@ -62,7 +62,10 @@ void Crawler::walk(std::string path) {
         path.erase(tp_path_len - 1);
     const char* cpath = path.c_str();
 
-    if (filter.is_ignored(path))
+    // A4: -i pruning happens HERE, mid-walk, BEFORE lstat — an ignored
+    // subtree costs zero syscalls (touch-mode correctness, pinned by
+    // tests). Matching reads the Options-owned pattern lists.
+    if (filters::is_ignored(opts.ignore, path))
         return;
 
     int res = opts.followsymlinks ? stat(cpath, &sb) : lstat(cpath, &sb);
@@ -172,7 +175,8 @@ void Crawler::walk(std::string path) {
             return;
         }
     } else if (S_ISREG(sb.st_mode) || S_ISBLK(sb.st_mode)) {
-        if (filter.is_filename_filtered(path)) {
+        // A4: -I is a per-file gate (directories are always traversed).
+        if (filters::is_included(opts.include, path)) {
             state_.total_files++;
             session_.process_file(path);
         }

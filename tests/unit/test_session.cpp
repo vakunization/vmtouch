@@ -6,6 +6,7 @@
 // numbers readable from stats().
 
 #include "helpers.h"
+#include "core/filters.h"
 
 #include <cerrno>
 
@@ -90,12 +91,12 @@ TEST(session_quiet_records_even_when_quiet) {
     EXPECT_EQ(fx.session->failures()[0].kind, Failure::Kind::BeyondEof);
 }
 
-TEST(session_filter_is_accessible_for_wiring) {
-    // The CLI fills a FileFilter before the Session exists and moves it in;
-    // Crawler reads it through the session. Pin that plumbing exists.
+TEST(session_filter_options_reach_the_crawler) {
+    // A4: filter policy is Options policy — patterns set on options().
+    // Pin that the crawler reads them (an ignored subtree is skipped).
     Fixture fx;
-    fx.session->filter().add_ignore("*.tmp");
-    EXPECT_TRUE(fx.session->filter().is_ignored("/x/y.tmp"));
+    fx.session->options().ignore.push_back("*.tmp");
+    EXPECT_TRUE(filters::is_ignored(fx.session->options().ignore, "/x/y.tmp"));
 }
 
 TEST(session_second_file_accumulates_stats) {

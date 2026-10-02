@@ -1,13 +1,15 @@
-// core/filters.h — ownership of the -i (ignore) and -I (filename filter)
-// pattern lists and the matching logic.
+// core/filters.h — -i (ignore) and -I (include/filename-filter) pattern
+// semantics. A4: the FileFilter CLASS is dissolved per the approved plan —
+// the pattern lists are caller policy now, living in Options
+// (Options.ignore / Options.include), and matching is a free function the
+// crawler inlines mid-walk (-i must prune DURING traversal: a directory
+// matching -i is never descended, zero syscalls — touch-mode correctness).
 //
-// Replaces four globals from the monolith (two char* arrays + two counters)
-// and fixes the latent bug where is_ignored()/is_filename_filtered() took
-// the list as a parameter but read the GLOBAL counters — the class owns
-// both, so list and count can never disagree.
-//
-// Matching stays fnmatch(3) (basename only, same flags as upstream) until
-// the modernization phase.
+// Matching semantics are unchanged and still pinned by tests: fnmatch(3)
+// on the basename only; no -i patterns => ignore nothing; no -I patterns
+// => keep everything. The fatal caps (pattern too long / too many) keep
+// their exact upstream message texts and now live in the add_* functions
+// below, called by the CLI during option parsing.
 
 #pragma once
 
@@ -15,31 +17,23 @@
 #include <string_view>
 #include <vector>
 
-class FileFilter {
-public:
-    // Adds one -i pattern. Throws FatalError on the same conditions the
-    // monolith's parse_ignore_item() treated as fatal (pattern too long,
-    // too many patterns) — message text preserved.
-    void add_ignore(std::string pattern);
+#include "common.h"
 
-    // Adds one -I pattern. Same fatal conditions as add_ignore().
-    void add_filename_filter(std::string pattern);
+namespace filters {
 
-    // True if the file should be skipped: basename matches any -i pattern.
-    // False when no ignore patterns are configured (upstream behavior).
-    bool is_ignored(std::string_view path) const;
+// True if the path should be skipped: basename matches any -i pattern.
+// False when no ignore patterns are configured (upstream behavior).
+bool is_ignored(const std::vector<std::string>& ignore, std::string_view path);
 
-    // False if the file should be skipped: basename matches none of the -I
-    // patterns. True (keep) when no filter patterns are configured.
-    bool is_filename_filtered(std::string_view path) const;
+// False if the file should be skipped: basename matches none of the -I
+// patterns. True (keep) when no include patterns are configured.
+bool is_included(const std::vector<std::string>& include, std::string_view path);
 
-    bool has_ignores() const { return !ignores_.empty(); }
-    bool has_filters() const { return !filters_.empty(); }
+// Adds one -i pattern with the upstream caps (pattern too long / too many
+// patterns -> FatalError, message text preserved verbatim).
+void add_ignore(std::vector<std::string>& ignore, std::string pattern);
 
-private:
-    bool basename_matches(const std::vector<std::string>& patterns,
-                          std::string_view path) const;
+// Adds one -I pattern; same caps and texts as add_ignore().
+void add_include(std::vector<std::string>& include, std::string pattern);
 
-    std::vector<std::string> ignores_;
-    std::vector<std::string> filters_;
-};
+} // namespace filters

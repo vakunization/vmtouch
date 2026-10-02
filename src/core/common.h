@@ -10,6 +10,8 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <string>
+#include <vector>
 #include <functional>
 #include <stdexcept>
 #include <string_view>
@@ -47,6 +49,12 @@ struct Options {
     const char* pidfile = nullptr;
     const char* output = nullptr;
     int zero_delim = 0;
+
+    // A4: filters are caller policy — plain pattern lists on Options
+    // (approved A4 shape). `ignore` is the -i list (subtree PRUNE during
+    // traversal); `include` is the -I list (per-file gate).
+    std::vector<std::string> ignore;
+    std::vector<std::string> include;
 };
 
 // Per-file selection range (from -p). Was "struct FileInfo" in the monolith;
