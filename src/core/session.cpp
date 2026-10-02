@@ -154,13 +154,20 @@ Status Session::process_file(const std::string& path) {
         if (r.mincore_inaccurate)
             fail(Failure::Kind::MincoreInaccurate, 0, path);
         if (r.evict_failed)
-            fail(Failure::Kind::EvictFailed, r.err, path);
+            fail(r.evict_kind, r.err, path);
 
         // Region keep-policy, exactly upstream's bail-out guard
         // (!o_lock && !o_lockall && mem -> munmap):
-        if (opts_.lock || opts_.lockall)
+        if (opts_.lock || opts_.lockall) {
             kept_regions_.push_back(std::move(r.region));   // stays mapped
-        // else: region's destructor munmaps on scope exit
+        } else {
+            // The session munmaps here (not the region's destructor) so a
+            // munmap failure becomes a Failure record WITH path context —
+            // upstream: "unable to munmap file %s (%s)".
+            int munmap_err = 0;
+            if (!r.region.unmap(munmap_err))
+                fail(Failure::Kind::MunmapFailed, munmap_err, path);
+        }
 
         if (r.code == cache::Result::Code::Ok) {
             st = Status::Ok;

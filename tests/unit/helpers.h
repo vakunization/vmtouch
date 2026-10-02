@@ -81,12 +81,17 @@ struct WarningCapture {
     }
     bool empty() const { return failures.empty(); }
     size_t size() const { return failures.size(); }
-    // test-side formatter mirroring the CLI's format_failure
+    // test-side formatter mirroring the CLI's format_failure (A1-drift fix:
+    // all 19 kinds carry the exact upstream site texts)
     static std::string format(const Failure& f) {
         switch (f.kind) {
             case Failure::Kind::Open:          return "unable to open " + f.path;
             case Failure::Kind::Stat:          return "unable to stat " + f.path;
+            case Failure::Kind::FstatFailed:   return "unable to fstat " + f.path;
+            case Failure::Kind::IoctlSizeFailed: return "unable to ioctl " + f.path;
             case Failure::Kind::Map:           return "unable to mmap file " + f.path;
+            case Failure::Kind::MunmapFailed:  return "unable to munmap file " + f.path;
+            case Failure::Kind::OpendirFailed: return "unable to opendir " + f.path;
             case Failure::Kind::TooLarge:      return "file " + f.path + " too large, skipping";
             case Failure::Kind::BeyondEof:     return "file " + f.path + " smaller than offset, skipping";
             case Failure::Kind::NotRegular:    return "skipping non-regular file: " + f.path;
@@ -96,6 +101,8 @@ struct WarningCapture {
             case Failure::Kind::PathTooLong:   return "path too long " + f.path;
             case Failure::Kind::MincoreInaccurate: return "mincore inaccurate";
             case Failure::Kind::EvictFailed:   return "unable to evict " + f.path;
+            case Failure::Kind::EvictAdviseFailed:  return "unable to posix_fadvise file " + f.path;
+            case Failure::Kind::EvictInvalidateFailed: return "unable to msync invalidate file " + f.path;
             case Failure::Kind::Closedir:      return "unable to closedir " + f.path;
         }
         return "";

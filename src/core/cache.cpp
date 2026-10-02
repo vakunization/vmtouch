@@ -60,7 +60,7 @@ Result prelude(int fd, const Params& p, Mapping& m) {
     if (fstat(fd, &sb)) {
         Result r;
         r.code = Result::Code::Skipped;
-        r.skip = Failure::Kind::Stat;
+        r.skip = Failure::Kind::FstatFailed;   // upstream: "unable to fstat ... skipping"
         r.err = errno;
         return r;
     }
@@ -71,7 +71,7 @@ Result prelude(int fd, const Params& p, Mapping& m) {
         if (ioctl(fd, BLKGETSIZE64, &m.len_of_file)) {
             Result r;
             r.code = Result::Code::Skipped;
-            r.skip = Failure::Kind::Stat;
+            r.skip = Failure::Kind::IoctlSizeFailed;   // upstream: "unable to ioctl"
             r.err = errno;
             return r;
         }
@@ -259,11 +259,17 @@ Result evict(int fd, const Params& p, EngineEvents* ev) {
 
     Result r;
 #if defined(__linux__) || defined(__hpux)
-    if (posix_fadvise(fd, p.range.offset, m.len_of_range, POSIX_FADV_DONTNEED))
+    if (posix_fadvise(fd, p.range.offset, m.len_of_range, POSIX_FADV_DONTNEED)) {
         r.evict_failed = true;
+        r.evict_kind = Failure::Kind::EvictAdviseFailed;   // upstream: "unable to posix_fadvise file"
+        r.err = errno;
+    }
 #elif defined(__FreeBSD__) || defined(__sun__) || defined(__APPLE__)
-    if (msync(m.region.mem(), m.len_of_range, MS_INVALIDATE))
+    if (msync(m.region.mem(), m.len_of_range, MS_INVALIDATE)) {
         r.evict_failed = true;
+        r.evict_kind = Failure::Kind::EvictInvalidateFailed;   // upstream: "unable to msync invalidate file"
+        r.err = errno;
+    }
 #else
     throw FatalError("cache eviction not (yet?) supported on this platform");
 #endif

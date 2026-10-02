@@ -145,7 +145,7 @@ void Crawler::walk(std::string path) {
             }
 
             if (dirp == NULL) {
-                session_.fail(Failure::Kind::Open, errno, path);
+                session_.fail(Failure::Kind::OpendirFailed, errno, path);   // upstream: "unable to opendir"
                 return;
             }
         }

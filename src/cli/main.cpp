@@ -162,8 +162,16 @@ static std::string format_failure(const Failure& f) {
       return "unable to open " + f.path + " (" + strerror(f.err) + "), skipping";
     case Failure::Kind::Stat:
       return "unable to stat " + f.path + " (" + strerror(f.err) + ")";
+    case Failure::Kind::FstatFailed:
+      return "unable to fstat " + f.path + " (" + strerror(f.err) + "), skipping";
+    case Failure::Kind::IoctlSizeFailed:
+      return "unable to ioctl " + f.path + " (" + strerror(f.err) + "), skipping";
     case Failure::Kind::Map:
       return "unable to mmap file " + f.path + " (" + strerror(f.err) + "), skipping";
+    case Failure::Kind::MunmapFailed:
+      return "unable to munmap file " + f.path + " (" + strerror(f.err) + ")";
+    case Failure::Kind::OpendirFailed:
+      return "unable to opendir " + f.path + " (" + strerror(f.err) + "), skipping";
     case Failure::Kind::TooLarge:
       return "file " + f.path + " too large, skipping";
     case Failure::Kind::BeyondEof:
@@ -182,6 +190,10 @@ static std::string format_failure(const Failure& f) {
       return "Process does not have write permission, residency chart will not be accurate";
     case Failure::Kind::EvictFailed:
       return "unable to evict " + f.path + " (" + strerror(f.err) + ")";
+    case Failure::Kind::EvictAdviseFailed:
+      return "unable to posix_fadvise file " + f.path + " (" + strerror(f.err) + ")";
+    case Failure::Kind::EvictInvalidateFailed:
+      return "unable to msync invalidate file " + f.path + " (" + strerror(f.err) + ")";
     case Failure::Kind::Closedir:
       return "unable to closedir " + f.path + " (" + strerror(f.err) + ")";
   }

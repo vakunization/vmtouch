@@ -84,8 +84,8 @@ public:
 struct Failure {
     enum class Kind : int {
         Open = 1,             // unable to open
-        Stat = 2,             // unable to stat / fstat / ioctl size
-        Map = 3,              // unable to mmap / munmap
+        Stat = 2,             // unable to stat (crawl lstat/stat)
+        Map = 3,              // unable to mmap
         TooLarge = 4,         // file exceeds -m
         BeyondEof = 5,        // -p offset beyond EOF
         NotRegular = 6,       // skipping non-regular file
@@ -96,6 +96,16 @@ struct Failure {
         MincoreInaccurate = 11, // kernel >= 5.2 write-permission heuristic
         EvictFailed = 12,     // fadvise/msync eviction failure
         Closedir = 13,        // unable to closedir
+        // --- A1-drift fix (commit following A2): upstream renders these
+        // five failure SITES with their own texts; the coarse kinds above
+        // cannot reproduce them. New values only — the frozen 13 keep
+        // their numbers (Phase-3 C enum maps 1:1).
+        FstatFailed = 14,     // unable to fstat PATH (ERR), skipping
+        IoctlSizeFailed = 15, // unable to ioctl PATH (ERR), skipping
+        OpendirFailed = 16,   // unable to opendir PATH (ERR), skipping
+        MunmapFailed = 17,    // unable to munmap file PATH (ERR)
+        EvictAdviseFailed = 18,     // unable to posix_fadvise file PATH (ERR)
+        EvictInvalidateFailed = 19, // unable to msync invalidate file PATH (ERR)
     };
     Kind        kind;
     int         err = 0;    // errno, 0 if not applicable

@@ -70,6 +70,20 @@ public:
     int64_t len() const { return len_; }
     explicit operator bool() const { return mem_ != nullptr; }
 
+    // Explicit early munmap (used by the session when the mapping must NOT
+    // be kept — with path context available for a munmap-failure warning,
+    // which the destructor cannot provide). Idempotent: clears the region.
+    // Returns false + errno if munmap(2) fails (region still cleared).
+    bool unmap(int& err) {
+        if (!mem_)
+            return true;
+        const bool ok = munmap(mem_, len_) == 0;
+        err = ok ? 0 : errno;
+        mem_ = nullptr;
+        len_ = 0;
+        return ok;
+    }
+
 private:
     void* mem_ = nullptr;
     int64_t len_ = 0;
@@ -95,10 +109,11 @@ struct Result {
     };
     FatalWhat fatal = FatalWhat::None;
 
-    // --- Facts collected: the session decides what to keep --------------
+    // Facts collected: the session decides what to keep --------------
     int64_t pages_total = 0;                    // was stats.total_pages +=
     int64_t pages_resident = 0;                 // was stats.total_pages_in_core +=
     bool evict_failed = false;                  // fadvise/msync failed (still Ok)
+    Failure::Kind evict_kind = Failure::Kind::EvictFailed;  // which upstream text
     bool mincore_inaccurate = false;            // kernel>=5.2 heuristic
 
     MappedRegion region;                        // live mapping (may be empty)

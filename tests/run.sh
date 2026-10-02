@@ -256,6 +256,19 @@ else
   echo "  skip unreadable-file test (running as root)"
 fi
 
+# unreadable directory: warns with the upstream opendir text (not "unable to
+# open"); pins the A1-drift fix for the opendir failure site
+if [ "$(id -u)" != 0 ]; then
+  mkdir -p "$T/nodir"
+  mk "$T/nodir/f" 1
+  chmod 000 "$T/nodir"
+  out=$("$VMFILE" -v "$T/nodir" 2>&1); rc_is $? 0 "unreadable dir exits 0"
+  has "$out" "unable to opendir $T/nodir" "unreadable dir warns with opendir text"
+  chmod 755 "$T/nodir"
+else
+  echo "  skip unreadable-dir test (running as root)"
+fi
+
 # -p offset beyond EOF: warning, file skipped
 out=$("$VMFILE" -v -p "100M-200M" "$T/ten" 2>&1); rc_is $? 0 "-p beyond EOF exits 0"
 has "$out" "smaller than offset" "-p beyond EOF warns"
