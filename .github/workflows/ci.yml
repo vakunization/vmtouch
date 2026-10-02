@@ -6,7 +6,10 @@ on:
   pull_request:
 
 jobs:
-  test:
+  # Sanitizer build: memory correctness. Both test layers run here, but
+  # note ASan intercepts mlock(2), so the mlock-failure unit test self-skips
+  # (see test_cache.cpp) — the real syscall path is covered by the plain job.
+  test-sanitized:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -23,7 +26,10 @@ jobs:
       - name: Verify sanitizer linked
         run: ldd build/vmtouch | grep -qi 'libasan\|libubsan'
 
-      - name: Run tests
+      - name: Unit tests (ctest)
+        run: cd build && ctest --output-on-failure
+
+      - name: Characterization tests
         shell: bash
         env:
           UBSAN_OPTIONS: print_stacktrace=1
@@ -45,3 +51,22 @@ jobs:
         with:
           name: test-log
           path: logs/
+
+  # Plain build: no instrumentation — real syscall behavior (mlock failure
+  # path), zero-warning gate with -Wall -Wextra, full test suite.
+  test-plain:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (warnings are errors)
+        run: cmake --build build -j -- WARN_FLAGS=-Werror
+
+      - name: Unit tests (ctest)
+        run: cd build && ctest --output-on-failure

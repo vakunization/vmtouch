@@ -18,8 +18,14 @@ target_link_libraries(vmtouch PRIVATE vmtouch_core)
 target_include_directories(vmtouch_core PUBLIC src tests)
 target_include_directories(vmtouch PRIVATE src)
 
-target_compile_options(vmtouch PRIVATE -Wall -Wextra)
-target_compile_options(vmtouch_core PRIVATE -Wall -Wextra)
+# Warning flags: -Wall -Wextra always; CI's plain job passes
+# -DWARN_FLAGS=-Werror to make any warning fatal.
+set(WARN_FLAGS "" CACHE STRING "Extra warning flags (e.g. -Werror)")
+target_compile_options(vmtouch PRIVATE -Wall -Wextra ${WARN_FLAGS})
+target_compile_options(vmtouch_core PRIVATE -Wall -Wextra ${WARN_FLAGS})
+if(TARGET unit_tests)
+    target_compile_options(unit_tests PRIVATE -Wall -Wextra ${WARN_FLAGS})
+endif()
 
 option(VMFTOUCH_SANITIZE "Build with ASan+UBSan" OFF)
 if(VMFTOUCH_SANITIZE)
