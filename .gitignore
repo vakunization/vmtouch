@@ -1,5 +1,10 @@
-vmtouch
-vmtouch.8
-
+# Build outputs
 /build/
 /build-plain/
+/vmtouch
+/vmtouch.8
+
+# Editor / OS noise
+*.swp
+*~
+.DS_Store

@@ -14,8 +14,15 @@ vmtouch is a tool for learning about and controlling the file system cache of un
 
     $ git clone https://github.com/hoytech/vmtouch.git
     $ cd vmtouch
-    $ make
-    $ sudo make install
+    $ cmake -S . -B build
+    $ cmake --build build -j
+    $ sudo cmake --install build
+
+### Build options
+
+- `-DVMFTOUCH_SANITIZE=ON` — build with ASan+UBSan (development)
+- `ctest` in the build directory runs the unit tests and the CLI
+  characterization suite
 
 
 ### More information
