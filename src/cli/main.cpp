@@ -59,6 +59,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #include <sys/wait.h>
 #include <limits.h>
 #include <inttypes.h>
+#include <functional>
 #include <errno.h>
 #include <math.h>      // HUGE_VAL in parse_size
 #include <fcntl.h>
@@ -150,6 +151,41 @@ static void warning(const char *fmt, bool quiet, ...) {
   va_end(ap);
 
   if (!quiet) fprintf(stderr, "vmtouch: WARNING: %s\n", buf);
+}
+
+// A1: convert a structured Failure record to the historical warning text.
+// Byte-identical to the strings the monolith built at each site. The
+// library never sees these strings.
+static std::string format_failure(const Failure& f) {
+  switch (f.kind) {
+    case Failure::Kind::Open:
+      return "unable to open " + f.path + " (" + strerror(f.err) + "), skipping";
+    case Failure::Kind::Stat:
+      return "unable to stat " + f.path + " (" + strerror(f.err) + ")";
+    case Failure::Kind::Map:
+      return "unable to mmap file " + f.path + " (" + strerror(f.err) + "), skipping";
+    case Failure::Kind::TooLarge:
+      return "file " + f.path + " too large, skipping";
+    case Failure::Kind::BeyondEof:
+      return "file " + f.path + " smaller than offset, skipping";
+    case Failure::Kind::NotRegular:
+      return "skipping non-regular file: " + f.path;
+    case Failure::Kind::Symlink:
+      return "not following symbolic link " + f.path;
+    case Failure::Kind::SeparateFs:
+      return "not recursing into separate filesystem " + f.path;
+    case Failure::Kind::CrawlLoop:
+      return "symbolic link loop detected: " + f.path;
+    case Failure::Kind::PathTooLong:
+      return "path too long " + f.path;
+    case Failure::Kind::MincoreInaccurate:
+      return "Process does not have write permission, residency chart will not be accurate";
+    case Failure::Kind::EvictFailed:
+      return "unable to evict " + f.path + " (" + strerror(f.err) + ")";
+    case Failure::Kind::Closedir:
+      return "unable to closedir " + f.path + " (" + strerror(f.err) + ")";
+  }
+  return "";
 }
 
 static void reopen_all() {
@@ -385,7 +421,7 @@ static std::unique_ptr<Crawler> g_crawler;
 // list file or stdin ("-") and walks each. This is input-driving, i.e. a
 // CLI concern: the library only ever sees walk() per path. Deliberately
 // kept OUT of src/core (no fopen under core — success criterion).
-static void walk_batch(Crawler& crawler, const Options& o) {
+static void walk_batch(Crawler& crawler, const Options& o, std::function<void()> drain_failures) {
   FILE* f;
   char* line = NULL;
   size_t len = 0;
@@ -406,6 +442,7 @@ static void walk_batch(Crawler& crawler, const Options& o) {
   while ((read = getdelim(&line, &len, delim, f)) != -1) {
     line[read - 1] = '\0';   // strip the delimiter
     crawler.walk(line);
+    drain_failures();
   }
 
   free(line);
@@ -549,13 +586,11 @@ static int run(int argc, char **argv) {
   }
 
   // Session created AFTER option parsing/validation so it holds the final
-  // Options; owns the ChartSink and the warning printer (quiet handled
-  // inside Session::warning).
+  // Options; owns the ChartSink. Failures are recorded as structured data
+  // (A1); this formatter converts records to the historical text at print
+  // time — the exact wording the monolith emitted.
   g_session = std::make_unique<Session>(o, std::move(cli_filter), std::make_unique<ChartSink>(),
-      [](std::string_view msg) {
-        fprintf(stderr, "vmtouch: WARNING: %.*s\n",
-                static_cast<int>(msg.size()), msg.data());
-      });
+      [](std::string_view msg) {});   // legacy param; removed in A2
   g_session->set_range(f);
   g_crawler = std::make_unique<Crawler>(*g_session);
 
@@ -564,11 +599,35 @@ static int run(int argc, char **argv) {
 
   gettimeofday(&start_time, NULL);
 
+  // Print failures recorded since the last drain, converting records to the
+  // historical warning text. The quiet policy lives HERE (CLI): the library
+  // records everything regardless of -q.
+  size_t printed_failures = 0;
+  auto drain_failures = [&]() {
+    if (o.quiet) {
+      printed_failures = g_session->failures().size();
+      return;
+    }
+    const auto& fs = g_session->failures();
+    for (; printed_failures < fs.size(); ++printed_failures) {
+      const Failure& f = fs[printed_failures];
+      std::string msg = format_failure(f);
+      if (!msg.empty())
+        fprintf(stderr, "vmtouch: WARNING: %s\n", msg.c_str());
+    }
+  };
+
+  auto run_one = [&](const char* path) {
+    g_crawler->walk(path);
+    drain_failures();
+  };
+
   if (o.batch) {
-      walk_batch(*g_crawler, o);
+      walk_batch(*g_crawler, o, drain_failures);
+      drain_failures();
   }
 
-  for (i=0; i<argc; i++) g_crawler->walk(argv[i]);
+  for (i=0; i<argc; i++) run_one(argv[i]);
 
   gettimeofday(&end_time, NULL);
 

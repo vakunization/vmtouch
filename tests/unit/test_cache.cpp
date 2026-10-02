@@ -30,8 +30,9 @@ TEST(cache_query_fresh_file_accounting) {
     Stats stats;
 
     auto fi = unit::make_file_info(f.path, f.fd);
+    unit::WarnOf warn_adapt(warn);
     auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  unit::warn_of(warn), sink);
+                                  warn_adapt, sink);
 
     EXPECT_EQ((int)st, (int)Status::Ok);
     EXPECT_EQ(stats.total_pages, 4);          // whole file: 4 pages
@@ -39,7 +40,7 @@ TEST(cache_query_fresh_file_accounting) {
     EXPECT_EQ(sink.done.size(), (size_t)1);
     EXPECT_EQ(sink.done[0].second.first, 4);  // pages_in_file in on_file_done
     EXPECT_TRUE(sink.evictings.empty());
-    EXPECT_TRUE(warn.messages.empty());       // fresh 4-page file: no warnings
+    EXPECT_TRUE(warn.empty());       // fresh 4-page file: no warnings
 }
 
 TEST(cache_query_resident_count_is_consistent) {
@@ -56,8 +57,9 @@ TEST(cache_query_resident_count_is_consistent) {
     unit::WarningCapture warn;
     Stats stats;
     auto fi = unit::make_file_info(f.path, f.fd);
+    unit::WarnOf warn_adapt(warn);
     auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  unit::warn_of(warn), sink);
+                                  warn_adapt, sink);
 
     EXPECT_EQ((int)st, (int)Status::Ok);
     EXPECT_EQ(stats.total_pages, 4);
@@ -74,24 +76,27 @@ TEST(cache_touch_makes_all_pages_resident) {
     // filesystem ignores eviction the assertions still hold: a touched
     // file must end up fully resident).
     unit::WarningCapture warn;
+    unit::WarnOf warn_adapt_evict(warn);
     unit::RecordingSink sink_evict;
     Stats stats_evict;
     auto fi = unit::make_file_info(f.path, f.fd);
     (void)cache::process_file(fi, cache::Mode::Evict, stats_evict,
-                              unit::warn_of(warn), sink_evict);
+                              warn_adapt_evict, sink_evict);
 
+    unit::WarnOf warn_adapt_touch(warn);
     unit::RecordingSink sink_touch;
     Stats stats_touch;
     auto st = cache::process_file(fi, cache::Mode::Touch, stats_touch,
-                                  unit::warn_of(warn), sink_touch);
+                                  warn_adapt_touch, sink_touch);
     EXPECT_EQ((int)st, (int)Status::Ok);
     EXPECT_EQ(stats_touch.total_pages, 3);
     // After -t the file must be fully resident (upstream contract). Verify
     // via a fresh query on the same fd:
+    unit::WarnOf warn_adapt_query(warn);
     unit::RecordingSink sink_query;
     Stats stats_query;
     (void)cache::process_file(fi, cache::Mode::Query, stats_query,
-                              unit::warn_of(warn), sink_query);
+                              warn_adapt_query, sink_query);
     EXPECT_EQ(stats_query.total_pages, 3);
     EXPECT_EQ(stats_query.total_pages_in_core, 3);   // touched => all resident
 }
@@ -102,10 +107,11 @@ TEST(cache_empty_file_skipped_silently) {
     unit::WarningCapture warn;
     Stats stats;
     auto fi = unit::make_file_info(f.path, f.fd);
+    unit::WarnOf warn_adapt(warn);
     auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  unit::warn_of(warn), sink);
+                                  warn_adapt, sink);
     EXPECT_EQ((int)st, (int)Status::Skipped);
-    EXPECT_TRUE(warn.messages.empty());      // upstream: silent for empty files
+    EXPECT_TRUE(warn.empty());      // upstream: silent for empty files
     EXPECT_TRUE(sink.file_starts.empty());
     EXPECT_EQ(stats.total_pages, 0);
 }
@@ -117,10 +123,12 @@ TEST(cache_file_larger_than_max_skips_with_warning) {
     Stats stats;
     auto fi = unit::make_file_info(f.path, f.fd);
     fi.max_file_size = static_cast<size_t>(pagesize);   // -m 1 page
+    unit::WarnOf warn_adapt(warn);
     auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  unit::warn_of(warn), sink);
+                                  warn_adapt, sink);
     EXPECT_EQ((int)st, (int)Status::Skipped);
-    EXPECT_TRUE(warn.contains("too large"));
+    EXPECT_EQ(warn.size(), (size_t)1);
+    EXPECT_EQ(warn.failures[0].kind, Failure::Kind::TooLarge);
     EXPECT_EQ(stats.total_pages, 0);
     EXPECT_TRUE(sink.file_starts.empty());
 }
@@ -131,10 +139,13 @@ TEST(cache_offset_beyond_eof_skips_with_warning) {
     unit::WarningCapture warn;
     Stats stats;
     auto fi = unit::make_file_info(f.path, f.fd, /*offset=*/10 * pagesize);
+    unit::WarnOf warn_adapt(warn);
     auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  unit::warn_of(warn), sink);
+                                  warn_adapt, sink);
     EXPECT_EQ((int)st, (int)Status::Skipped);
-    EXPECT_TRUE(warn.contains("smaller than offset"));
+    EXPECT_EQ(warn.size(), (size_t)1);
+    EXPECT_EQ(warn.failures[0].kind, Failure::Kind::BeyondEof);
+    EXPECT_EQ(warn.failures[0].offset, 10 * pagesize);
     EXPECT_EQ(stats.total_pages, 0);
 }
 
@@ -145,8 +156,9 @@ TEST(cache_partial_range_counts_only_selected_pages) {
     Stats stats;
     // -p second page only: offset = 1 page, max_len = 1 page
     auto fi = unit::make_file_info(f.path, f.fd, /*offset=*/pagesize, /*max_len=*/pagesize);
+    unit::WarnOf warn_adapt(warn);
     auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  unit::warn_of(warn), sink);
+                                  warn_adapt, sink);
     EXPECT_EQ((int)st, (int)Status::Ok);
     EXPECT_EQ(stats.total_pages, 1);         // only the selected page counts
     EXPECT_EQ(sink.done[0].second.first, 1);
@@ -158,8 +170,9 @@ TEST(cache_non_verbose_sinks_are_silent_but_stats_still_count) {
     unit::WarningCapture warn;
     Stats stats;
     auto fi = unit::make_file_info(f.path, f.fd, 0, 0, /*verbose=*/false);
+    unit::WarnOf warn_adapt(warn);
     auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  unit::warn_of(warn), sink);
+                                  warn_adapt, sink);
     EXPECT_EQ((int)st, (int)Status::Ok);
     EXPECT_EQ(stats.total_pages, 2);
     EXPECT_TRUE(sink.file_starts.empty());   // -v off: no output calls
@@ -197,10 +210,11 @@ TEST(cache_lock_failure_throws_fatal_error) {
     unit::WarningCapture warn;
     Stats stats;
     auto fi = unit::make_file_info(f.path, f.fd);
+    unit::WarnOf warn_adapt(warn);
     bool threw = false;
     try {
         (void)cache::process_file(fi, cache::Mode::Lock, stats,
-                                  unit::warn_of(warn), sink);
+                                  warn_adapt, sink);
     } catch (const FatalError& e) {
         threw = true;
         EXPECT_TRUE(std::string(e.what()).find("mlock:") != std::string::npos);

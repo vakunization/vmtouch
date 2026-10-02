@@ -71,11 +71,37 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-// Warning seam (the "Diagnostics folded into Session" decision): the
-// library never prints to stderr; the installer decides where warnings go.
-// Quiet (-q) handling lives with the owner of the options — Session::warning
-// checks it before invoking the callback.
+// LEGACY (removed in A2): the pre-A1 string-warning type. Kept only so the
+// Session constructor signature compiles during the A1 transition.
 using WarnFn = std::function<void(std::string_view msg)>;
+
+// ---------------------------------------------------------------------------
+// Structured failures (A1): the library reports FACTS, not strings. The CLI
+// formats them at print time; embedders (S1: "error codes I can log") read
+// them directly. C-shape note: Kind values are explicit and frozen — the
+// Phase-3 C enum maps 1:1.
+// ---------------------------------------------------------------------------
+struct Failure {
+    enum class Kind : int {
+        Open = 1,             // unable to open
+        Stat = 2,             // unable to stat / fstat / ioctl size
+        Map = 3,              // unable to mmap / munmap
+        TooLarge = 4,         // file exceeds -m
+        BeyondEof = 5,        // -p offset beyond EOF
+        NotRegular = 6,       // skipping non-regular file
+        Symlink = 7,          // not following symbolic link
+        SeparateFs = 8,       // -F: not recursing into other filesystem
+        CrawlLoop = 9,        // symbolic link loop detected
+        PathTooLong = 10,     // path exceeds PATH_MAX
+        MincoreInaccurate = 11, // kernel >= 5.2 write-permission heuristic
+        EvictFailed = 12,     // fadvise/msync eviction failure
+        Closedir = 13,        // unable to closedir
+    };
+    Kind        kind;
+    int         err = 0;    // errno, 0 if not applicable
+    std::string path;       // empty for fd-based ops
+    int64_t     offset = 0; // for range problems (BeyondEof)
+};
 
 struct Stats {
     int64_t total_pages = 0;

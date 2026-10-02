@@ -67,21 +67,51 @@ struct RecordingSink final : public cache::ProgressSink {
 };
 
 // ---------------------------------------------------------------------------
-// WarningCapture: collects warning messages (replaces stdout scraping).
+// WarningCapture (A1): captures structured Failure records instead of text.
+// `contains(text)` keeps the old substring-check ergonomics by formatting
+// each record the same way the CLI does.
 // ---------------------------------------------------------------------------
 struct WarningCapture {
-    std::vector<std::string> messages;
-    void add(std::string_view m) { messages.emplace_back(m); }
+    std::vector<Failure> failures;
+    void add(Failure f) { failures.push_back(std::move(f)); }
     bool contains(const std::string& fragment) const {
-        for (const auto& m : messages)
-            if (m.find(fragment) != std::string::npos) return true;
+        for (const auto& f : failures)
+            if (format(f).find(fragment) != std::string::npos) return true;
         return false;
+    }
+    bool empty() const { return failures.empty(); }
+    size_t size() const { return failures.size(); }
+    // test-side formatter mirroring the CLI's format_failure
+    static std::string format(const Failure& f) {
+        switch (f.kind) {
+            case Failure::Kind::Open:          return "unable to open " + f.path;
+            case Failure::Kind::Stat:          return "unable to stat " + f.path;
+            case Failure::Kind::Map:           return "unable to mmap file " + f.path;
+            case Failure::Kind::TooLarge:      return "file " + f.path + " too large, skipping";
+            case Failure::Kind::BeyondEof:     return "file " + f.path + " smaller than offset, skipping";
+            case Failure::Kind::NotRegular:    return "skipping non-regular file: " + f.path;
+            case Failure::Kind::Symlink:       return "not following symbolic link " + f.path;
+            case Failure::Kind::SeparateFs:    return "not recursing into separate filesystem " + f.path;
+            case Failure::Kind::CrawlLoop:     return "symbolic link loop detected: " + f.path;
+            case Failure::Kind::PathTooLong:   return "path too long " + f.path;
+            case Failure::Kind::MincoreInaccurate: return "mincore inaccurate";
+            case Failure::Kind::EvictFailed:   return "unable to evict " + f.path;
+            case Failure::Kind::Closedir:      return "unable to closedir " + f.path;
+        }
+        return "";
     }
 };
 
-inline WarnFn warn_of(WarningCapture& w) {
-    return [&w](std::string_view m) { w.add(m); };
-}
+// FailureSink adapter over WarningCapture (A1) — for direct cache-level tests.
+struct WarnOf final : public cache::FailureSink {
+    WarningCapture* w;
+    std::string path;   // cache-level calls carry no path; attached if set
+    explicit WarnOf(WarningCapture& cap, std::string p = "")
+        : w(&cap), path(std::move(p)) {}
+    void add(Failure::Kind kind, int err, int64_t offset = 0) override {
+        w->add(Failure{kind, err, path, offset});
+    }
+};
 
 // S3-style FileInfo for an already-open fd (caller owns the fd).
 inline cache::FileInfo make_file_info(const std::string& path, int fd,
@@ -133,7 +163,7 @@ make_session(std::shared_ptr<SharedSinkState> state, WarningCapture& warn,
     auto s = std::make_unique<Session>(
         o,
         std::make_unique<SharedSink>(std::move(state)),
-        [&warn](std::string_view m) { warn.add(m); });
+        [&warn](std::string_view) {});   // legacy WarnFn; records are read via warn
     s->set_range(range);
     return s;
 }
@@ -148,7 +178,7 @@ make_session(std::shared_ptr<SharedSinkState> state, WarningCapture& warn,
     auto s = std::make_unique<Session>(
         o,
         std::make_unique<SharedSink>(std::move(state)),
-        [&warn](std::string_view m) { warn.add(m); });
+        [&warn](std::string_view) {});   // legacy WarnFn; records are read via warn
     s->set_range(range);
     return s;
 }

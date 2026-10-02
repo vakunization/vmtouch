@@ -17,14 +17,21 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace unit {
 
 // Stringify a value for failure messages: numbers via std::to_string,
-// strings/paths verbatim.
+// strings/paths verbatim, enums via their underlying integer.
 template <class T>
 std::string to_display(const T& v) { return std::to_string(v); }
+
+template <class E>
+    requires std::is_enum_v<E>
+std::string to_display(const E& v) {
+    return std::to_string(static_cast<int>(v));
+}
 
 inline std::string to_display(const std::string& v) { return v; }
 inline std::string to_display(const char* v) { return v; }

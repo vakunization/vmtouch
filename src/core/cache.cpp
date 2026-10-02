@@ -46,7 +46,7 @@ constexpr double kChartUpdateInterval = 0.1;
 } // namespace
 
 Status process_file(const FileInfo& fi, Mode mode, Stats& stats,
-                    const WarnFn& warn, ProgressSink& sink) {
+                    FailureSink& failures, ProgressSink& sink) {
     void* mem = NULL;
     int64_t len_of_file = 0;
     int64_t len_of_range = 0;
@@ -54,22 +54,18 @@ Status process_file(const FileInfo& fi, Mode mode, Stats& stats,
     const int fd = fi.fd;
     const std::string_view path = fi.path;
 
-    auto do_warn = [&](const std::string& msg) {
-        if (warn) warn(msg);
-    };
-
     // ---- size of the object (fd is the identity; fstat here mirrors what
     //      the monolith did right before mmap) ----------------------------
     struct stat sb;
     if (fstat(fd, &sb)) {
-        do_warn("unable to fstat " + std::string(path) + " (" + strerror(errno) + "), skipping");
+        failures.add(Failure::Kind::Stat, errno);
         return Status::Skipped;
     }
 
     if (S_ISBLK(sb.st_mode)) {
 #if defined(__linux__)
         if (ioctl(fd, BLKGETSIZE64, &len_of_file)) {
-            do_warn("unable to ioctl " + std::string(path) + " (" + strerror(errno) + "), skipping");
+            failures.add(Failure::Kind::Stat, errno);
             return Status::Skipped;
         }
 #else
@@ -84,7 +80,7 @@ Status process_file(const FileInfo& fi, Mode mode, Stats& stats,
     }
 
     if (static_cast<uint64_t>(len_of_file) > fi.max_file_size) {
-        do_warn("file " + std::string(path) + " too large, skipping");
+        failures.add(Failure::Kind::TooLarge);
         return Status::Skipped;
     }
 
@@ -93,7 +89,7 @@ Status process_file(const FileInfo& fi, Mode mode, Stats& stats,
     if (fi.max_len > 0 && (fi.offset + fi.max_len) < len_of_file) {
         len_of_range = fi.max_len;
     } else if (fi.offset >= len_of_file) {
-        do_warn("file " + std::string(path) + " smaller than offset, skipping");
+        failures.add(Failure::Kind::BeyondEof, 0, fi.offset);
         return Status::Skipped;
     } else {
         len_of_range = len_of_file - fi.offset;
@@ -104,7 +100,7 @@ Status process_file(const FileInfo& fi, Mode mode, Stats& stats,
     mem = mmap(NULL, len_of_range, PROT_READ, MAP_SHARED, fd, fi.offset);
 
     if (mem == MAP_FAILED) {
-        do_warn("unable to mmap file " + std::string(path) + " (" + strerror(errno) + "), skipping");
+        failures.add(Failure::Kind::Map, errno);
         return Status::Skipped;
     }
 
@@ -123,10 +119,10 @@ Status process_file(const FileInfo& fi, Mode mode, Stats& stats,
 
 #if defined(__linux__) || defined(__hpux)
         if (posix_fadvise(fd, fi.offset, len_of_range, POSIX_FADV_DONTNEED))
-            do_warn("unable to posix_fadvise file " + std::string(path) + " (" + strerror(errno) + ")");
+            failures.add(Failure::Kind::EvictFailed, errno);
 #elif defined(__FreeBSD__) || defined(__sun__) || defined(__APPLE__)
         if (msync(mem, len_of_range, MS_INVALIDATE))
-            do_warn("unable to msync invalidate file " + std::string(path) + " (" + strerror(errno) + ")");
+            failures.add(Failure::Kind::EvictFailed, errno);
 #else
         throw FatalError("cache eviction not (yet?) supported on this platform");
 #endif
@@ -152,7 +148,7 @@ Status process_file(const FileInfo& fi, Mode mode, Stats& stats,
             sink.on_file_start(path);
 #ifdef __linux__
             if (!platform::can_do_mincore(sb)) {
-                do_warn("Process does not have write permission, residency chart will not be accurate");
+                failures.add(Failure::Kind::MincoreInaccurate);
             }
 #endif
             last_chart_print_time = platform::now_seconds();
@@ -198,7 +194,7 @@ Status process_file(const FileInfo& fi, Mode mode, Stats& stats,
 
     if (mode != Mode::Lock && !fi.lockall && mem) {
         if (munmap(mem, len_of_range))
-            do_warn("unable to munmap file " + std::string(path) + " (" + strerror(errno) + ")");
+            failures.add(Failure::Kind::Map, errno);
     }
 
     return Status::Ok;

@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "common.h"
 #include "cache.h"
@@ -32,10 +33,19 @@ public:
     // cache::process_file. Returns the engine's Status.
     Status process_file(const std::string& path);
 
-    // True warning seam: quiet check lives here (owner of the Options).
-    void warning(std::string_view msg) const {
-        if (!opts_.quiet && warn_) warn_(msg);
+    // Structured failure recording (A1): crawl/cache report facts; Session
+    // appends them to its failure list. The quiet policy is applied by the
+    // CLI at print time — the library keeps ALL facts regardless of -q, so
+    // embedders get complete reports even in quiet runs.
+    void fail(Failure::Kind kind, int err, const std::string& path, int64_t offset = 0) {
+        failures_.push_back(Failure{kind, err, path, offset});
     }
+    // cache::FailureSink adapter: engine reports kinds without paths (the
+    // path travels in FileInfo; session attaches the current file's path).
+    void fail_for(const std::string& path, Failure::Kind kind, int err, int64_t offset = 0) {
+        failures_.push_back(Failure{kind, err, path, offset});
+    }
+    const std::vector<Failure>& failures() const { return failures_; }
 
     const Stats& stats() const { return stats_; }
     Stats& stats() { return stats_; }
@@ -52,4 +62,14 @@ private:
     FileFilter filter_;
     Stats stats_;
     FileInfoRange range_;
+    std::vector<Failure> failures_;
+
+    // cache::FailureSink adapter bound to the path being processed.
+    struct CacheFailureSink final : public cache::FailureSink {
+        Session* self;
+        std::string path;
+        void add(Failure::Kind kind, int err, int64_t offset = 0) override {
+            self->fail(kind, err, path, offset);
+        }
+    } cache_sink_adapter_;
 };

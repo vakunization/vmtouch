@@ -218,7 +218,8 @@ TEST(crawl_symlink_not_followed_by_default) {
     fx.crawler->walk(tree.path);
 
     // the link itself is not followed: warning + only d/f visited
-    EXPECT_TRUE(fx.warn.contains("not following symbolic link"));
+    EXPECT_EQ(fx.session->failures().size(), (size_t)1);
+    EXPECT_EQ(fx.session->failures()[0].kind, Failure::Kind::Symlink);
     EXPECT_EQ(fx.crawler->total_files(), 1);
 }
 
@@ -242,7 +243,7 @@ TEST(crawl_symlink_followed_with_f_flag) {
     // pinned upstream behavior, verified against the CLI.
     EXPECT_EQ(crawler.total_files(), 1);
     EXPECT_EQ(session->stats().total_pages, 1);
-    EXPECT_TRUE(warn.messages.empty());
+    EXPECT_TRUE(warn.empty());
 }
 
 TEST(crawl_symlink_loop_terminates_with_warning) {
@@ -261,7 +262,8 @@ TEST(crawl_symlink_loop_terminates_with_warning) {
 
     crawler.walk(tree.path);         // must terminate on its own
 
-    EXPECT_TRUE(warn.contains("symbolic link loop detected"));
+    EXPECT_EQ(session->failures().size(), (size_t)1);
+    EXPECT_EQ(session->failures()[0].kind, Failure::Kind::CrawlLoop);
 }
 
 TEST(crawl_trailing_slash_normalized) {

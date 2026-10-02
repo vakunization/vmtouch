@@ -87,7 +87,7 @@ Status Session::process_file(const std::string& path) {
     }
 
     if (fd == -1) {
-        warning("unable to open " + path + " (" + strerror(errno) + "), skipping");
+        fail(Failure::Kind::Open, errno, path);
         return Status::Skipped;
     }
 
@@ -105,11 +105,20 @@ Status Session::process_file(const std::string& path) {
     static cache::NullSink g_null_sink;
     cache::ProgressSink& sink = sink_ ? *sink_ : static_cast<cache::ProgressSink&>(g_null_sink);
 
+    // cache::FailureSink adapter: failures carry the path being processed.
+    struct PathSink final : public cache::FailureSink {
+        Session* self;
+        const std::string* path;
+        PathSink(Session* s, const std::string* p) : self(s), path(p) {}
+        void add(Failure::Kind kind, int err = 0, int64_t offset = 0) override {
+            self->fail(kind, err, *path, offset);
+        }
+    } path_sink{this, &path};
+
     Status st;
     try {
         st = cache::process_file(fi, mode_from_options(opts_), stats_,
-                                 [this](std::string_view msg) { warning(msg); },
-                                 sink);
+                                 path_sink, sink);
     } catch (...) {
         close(fd);
         throw;

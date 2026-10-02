@@ -66,12 +66,12 @@ void Crawler::walk(std::string path) {
     int res = opts.followsymlinks ? stat(cpath, &sb) : lstat(cpath, &sb);
 
     if (res) {
-        session_.warning("unable to stat " + path + " (" + strerror(errno) + ")");
+        session_.fail(Failure::Kind::Stat, errno, path);
         return;
     }
 
     if (S_ISLNK(sb.st_mode)) {
-        session_.warning("not following symbolic link " + path);
+        session_.fail(Failure::Kind::Symlink, 0, path);
         return;
     }
 
@@ -80,7 +80,7 @@ void Crawler::walk(std::string path) {
             state_.orig_device = sb.st_dev;
             state_.orig_device_inited = 1;
         } else if (sb.st_dev != state_.orig_device) {
-            session_.warning("not recursing into separate filesystem " + path);
+            session_.fail(Failure::Kind::SeparateFs, 0, path);
             return;
         }
     }
@@ -112,7 +112,7 @@ void Crawler::walk(std::string path) {
     if (S_ISDIR(sb.st_mode)) {
         for (int i = 0; i < state_.curr_crawl_depth; i++) {
             if (state_.crawl_inodes[i] == sb.st_ino) {
-                session_.warning("symbolic link loop detected: " + path);
+                session_.fail(Failure::Kind::CrawlLoop, 0, path);
                 return;
             }
         }
@@ -145,7 +145,7 @@ void Crawler::walk(std::string path) {
             }
 
             if (dirp == NULL) {
-                session_.warning("unable to opendir " + path + " (" + strerror(errno) + "), skipping");
+                session_.fail(Failure::Kind::Open, errno, path);
                 return;
             }
         }
@@ -156,7 +156,7 @@ void Crawler::walk(std::string path) {
 
             if (snprintf(npath, sizeof(npath), "%s/%s", cpath, de->d_name) >=
                 static_cast<int>(sizeof(npath))) {
-                session_.warning("path too long " + path);
+                session_.fail(Failure::Kind::PathTooLong, 0, path);
                 break;
             }
 
@@ -166,7 +166,7 @@ void Crawler::walk(std::string path) {
         }
 
         if (closedir(dirp)) {
-            session_.warning("unable to closedir " + path + " (" + strerror(errno) + ")");
+            session_.fail(Failure::Kind::Closedir, errno, path);
             return;
         }
     } else if (S_ISREG(sb.st_mode) || S_ISBLK(sb.st_mode)) {
@@ -175,6 +175,6 @@ void Crawler::walk(std::string path) {
             session_.process_file(path);
         }
     } else {
-        session_.warning("skipping non-regular file: " + path);
+        session_.fail(Failure::Kind::NotRegular, 0, path);
     }
 }

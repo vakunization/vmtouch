@@ -71,12 +71,23 @@ public:
     void on_file_done(std::string_view, int64_t, int64_t) override {}
 };
 
+// Failure sink (A1): the engine reports structured facts, not strings.
+// Session implements this (appending to its failure list, applying the
+// quiet policy); tests capture records instead of scraping text.
+// Note: cache also reports the path it was given via FileInfo — the sink
+// fills it in, keeping this call signature narrow.
+struct FailureSink {
+    virtual ~FailureSink() = default;
+    virtual void add(Failure::Kind kind, int err = 0, int64_t offset = 0) = 0;
+};
+
 // Process one file region according to mode.
 //  * Lock mode intentionally skips munmap (upstream mlockall semantics);
 //  * throws FatalError where continuing is pointless (mlock failure,
 //    mincore failure, allocation failure, misaligned mmap);
-//  * returns Skipped for the old warn+goto-bail cases (mmap failure etc.).
+//  * returns Skipped for the old warn+goto-bail cases (a Failure record is
+//    emitted to the sink for each).
 Status process_file(const FileInfo& fi, Mode mode, Stats& stats,
-                    const WarnFn& warn, ProgressSink& sink);
+                    FailureSink& failures, ProgressSink& sink);
 
 } // namespace cache
