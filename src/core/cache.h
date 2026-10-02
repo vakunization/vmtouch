@@ -1,93 +1,162 @@
-// core/cache.h — page-cache operations on an open file descriptor.
+// core/cache.h — page-cache verbs on an open file descriptor.
 //
-// The pure engine of vmtouch: mmap -> mincore -> query/touch/evict/mlock.
-// No printing, no exit(), no CLI state. All observable output goes through
-// ProgressSink; hopeless situations throw FatalError; recoverable ones are
-// reported via the warning callback and returned as Status::Skipped.
+// A2: the engine sheds `path` and `verbose` (they were FileInfo members).
+// It now exposes four internal verbs — inspect / warm / evict / lock —
+// working purely on the fd, and RETURNS DATA: the session decides what to
+// collect (stats, failures) and owns the mapping lifetime. Names here are
+// provisional; A5 formalizes the Verb/FileResult/Report vocabulary.
+//
+// Rules that survive from the Increment-1 engine:
+//   * no printing, no exit(), no CLI state, and now no paths;
+//   * hopeless situations either come back as fatal facts in the Result
+//     (when the historical message contained the path — the session
+//     re-adds it) or throw FatalError (already path-less text);
+//   * recoverable skips come back as data (Kind + errno), never strings.
 
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <span>
-#include <string_view>
+#include <stddef.h>
+
+#include <sys/mman.h>    // munmap
 
 #include "common.h"
 
 namespace cache {
 
-// What to do with the mapped pages. Maps the CLI flags:
-//   Query = neither -t nor -e nor -l (just report residency)
-//   Touch = -t (and -l, which touches then locks)
-//   Evict = -e
-//   Lock  = -l (implies touch; mapping is intentionally NOT unmapped)
-enum class Mode { Query, Touch, Evict, Lock };
-
-// Per-file work item, assembled by the session (commit 6). Until then the
-// CLI shim builds it directly. `path` is informational only (messages and
-// sink calls): the fd is the only I/O identity, so there is no TOCTOU
-// between the name and the object. Precondition: path outlives the call.
-struct FileInfo {
-    std::string_view path;
-    int fd;
-    int64_t offset;          // page-aligned start (from -p)
-    int64_t max_len;         // 0 = to end of file
-    size_t max_file_size;    // from -m; SIZE_MAX = unlimited (upstream default)
-    bool verbose;            // gates the print-equivalent sink calls, as upstream gated on o.verbose
-    bool lockall;            // from -L: suppress munmap exactly like upstream
+// Caller policy per call (was FileInfo minus path/verbose).
+struct Params {
+    FileInfoRange range;                    // -p: offset / max_len (0 = to EOF)
+    size_t max_file_size = SIZE_MAX;        // -m (upstream default: unlimited)
 };
 
-// Every stdout side effect the monolith's vmtouch_file() had, as sink calls.
-// Contract:
-//  * calls happen synchronously on the thread processing the file;
-//  * implementations must not throw;
-//  * the CHART_UPDATE_INTERVAL (0.1 s) throttle stays INSIDE the engine, so
-//    sinks fire at exactly the old print points;
-//  * the CLI's sink renders on_chart via print_page_residency_chart, keeping
-//    -v output byte-identical (tests/run.sh depends on it).
+// ---------------------------------------------------------------------------
+// MappedRegion: owning handle for a live mmap region. The verbs return it
+// instead of munmapping — the session decides keep-vs-drop (matches -l/-L
+// and the evict+lockall combination, which upstream kept mapped too).
+// Move-only; destructor munmaps. (The P-phase "vector+RAII MappedRegion"
+// modernization builds on this name.)
+// ---------------------------------------------------------------------------
+class MappedRegion {
+public:
+    MappedRegion() = default;
+    MappedRegion(void* mem, int64_t len) : mem_(mem), len_(len) {}
+    ~MappedRegion() {
+        if (mem_)
+            munmap(mem_, len_);
+    }
+
+    MappedRegion(MappedRegion&& other) noexcept : mem_(other.mem_), len_(other.len_) {
+        other.mem_ = nullptr;
+        other.len_ = 0;
+    }
+    MappedRegion& operator=(MappedRegion&& other) noexcept {
+        if (this != &other) {
+            if (mem_)
+                munmap(mem_, len_);
+            mem_ = other.mem_;
+            len_ = other.len_;
+            other.mem_ = nullptr;
+            other.len_ = 0;
+        }
+        return *this;
+    }
+
+    MappedRegion(const MappedRegion&) = delete;
+    MappedRegion& operator=(const MappedRegion&) = delete;
+
+    void* mem() const { return mem_; }
+    int64_t len() const { return len_; }
+    explicit operator bool() const { return mem_ != nullptr; }
+
+private:
+    void* mem_ = nullptr;
+    int64_t len_ = 0;
+};
+
+// Verb result: PLAIN DATA. Internal shape until A5 formalizes FileResult.
+struct Result {
+    enum class Code : int { Ok = 0, Skipped = 1, Fatal = 2 };
+    Code code = Code::Ok;
+
+    // --- Skipped: the session turns this into a Failure record ----------
+    bool silent = false;                        // empty file: skip, NO record
+    Failure::Kind skip = Failure::Kind::Stat;   // which record (when !silent)
+    int err = 0;                                // errno
+    int64_t offset = 0;                         // BeyondEof
+
+    // --- Fatal: the session classifies and re-adds path context ---------
+    enum class FatalWhat : int {
+        None = 0,
+        MlockFailed,        // err = errno; msg "mlock: PATH (ERR)"
+        MincoreFailed,      // err = errno; msg "mincore PATH (ERR)"
+        MisalignedMap,      // msg "mmap(PATH) wasn't page aligned"
+    };
+    FatalWhat fatal = FatalWhat::None;
+
+    // --- Facts collected: the session decides what to keep --------------
+    int64_t pages_total = 0;                    // was stats.total_pages +=
+    int64_t pages_resident = 0;                 // was stats.total_pages_in_core +=
+    bool evict_failed = false;                  // fadvise/msync failed (still Ok)
+    bool mincore_inaccurate = false;            // kernel>=5.2 heuristic
+
+    MappedRegion region;                        // live mapping (may be empty)
+};
+
+// ---------------------------------------------------------------------------
+// EngineEvents: live-progress events for the verbs, PATH-LESS (the engine
+// no longer knows a path). The session binds the current path via an
+// adapter and forwards to the caller-facing ProgressSink below. Interim
+// interface — A6 (final-state-only -v) removes it together with the chart
+// throttling.
+//
+// Contract (unchanged from ProgressSink):
+//   * calls happen synchronously on the thread processing the file;
+//   * implementations must not throw;
+//   * the CHART_UPDATE_INTERVAL (0.1 s) throttle stays INSIDE the engine,
+//     so events fire at exactly the old print points (run.sh parses them).
+//   * nullptr means non-verbose: no events AND no throttle clock reads.
+// ---------------------------------------------------------------------------
+class EngineEvents {
+public:
+    virtual ~EngineEvents() = default;
+
+    virtual void on_file_start() = 0;                       // was printf("%s\n", path)
+    virtual void on_evicting() = 0;                         // was printf("Evicting %s\n", path)
+    virtual void on_chart(std::span<const unsigned char> mincore_pages,
+                          int64_t pages_in_file) = 0;       // was print_page_residency_chart(...)
+    virtual void on_file_done(int64_t pages_in_file,
+                              int64_t pages_resident) = 0;  // ended the verbose block
+};
+
+// ---------------------------------------------------------------------------
+// Caller-facing progress sink (UNCHANGED from Increment 1 — the CLI's
+// ChartSink and the embedder docs keep this signature). The engine never
+// sees it directly anymore; the session's adapter bridges EngineEvents to
+// it, attaching the path of the file being processed.
+// ---------------------------------------------------------------------------
 class ProgressSink {
 public:
     virtual ~ProgressSink() = default;
 
-    virtual void on_file_start(std::string_view path) = 0;   // was: printf("%s\n", path)
-    virtual void on_evicting(std::string_view path) = 0;     // was: printf("Evicting %s\n", path)
+    virtual void on_file_start(std::string_view path) = 0;
+    virtual void on_evicting(std::string_view path) = 0;
     virtual void on_chart(std::span<const unsigned char> mincore_pages,
-                          int64_t pages_in_file) = 0;        // was: print_page_residency_chart(...)
-    // End of one verbose file block (was: the trailing printf("\\n")). The
-    // CLI's ChartSink prints the newline here so -v output stays
-    // byte-identical; embedders instead receive a per-file summary and
-    // decide what to do with it.
+                          int64_t pages_in_file) = 0;
     virtual void on_file_done(std::string_view path,
                               int64_t pages_in_file,
                               int64_t pages_resident) = 0;
 };
 
-// No-op sink: for embedders/tests (and Session when no sink is installed).
-class NullSink final : public ProgressSink {
-public:
-    void on_file_start(std::string_view) override {}
-    void on_evicting(std::string_view) override {}
-    void on_chart(std::span<const unsigned char>, int64_t) override {}
-    void on_file_done(std::string_view, int64_t, int64_t) override {}
-};
-
-// Failure sink (A1): the engine reports structured facts, not strings.
-// Session implements this (appending to its failure list, applying the
-// quiet policy); tests capture records instead of scraping text.
-// Note: cache also reports the path it was given via FileInfo — the sink
-// fills it in, keeping this call signature narrow.
-struct FailureSink {
-    virtual ~FailureSink() = default;
-    virtual void add(Failure::Kind kind, int err = 0, int64_t offset = 0) = 0;
-};
-
-// Process one file region according to mode.
-//  * Lock mode intentionally skips munmap (upstream mlockall semantics);
-//  * throws FatalError where continuing is pointless (mlock failure,
-//    mincore failure, allocation failure, misaligned mmap);
-//  * returns Skipped for the old warn+goto-bail cases (a Failure record is
-//    emitted to the sink for each).
-Status process_file(const FileInfo& fi, Mode mode, Stats& stats,
-                    FailureSink& failures, ProgressSink& sink);
+// The four internal verbs. fd is the only I/O identity. All share the same
+// prelude (fstat -> block-device size -> empty -> -m -> range -> mmap ->
+// alignment). Hopeless platform situations still throw path-less
+// FatalError (allocation failure, block-device size on non-Linux,
+// unsupported eviction platform).
+Result inspect(int fd, const Params& p, EngineEvents* ev);   // query residency
+Result warm(int fd, const Params& p, EngineEvents* ev);      // -t: touch pages
+Result evict(int fd, const Params& p, EngineEvents* ev);     // -e
+Result lock(int fd, const Params& p, EngineEvents* ev);      // -l: mlock + region
 
 } // namespace cache

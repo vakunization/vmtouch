@@ -1,10 +1,10 @@
-// tests/unit/test_cache.cpp — behavior tests for the page-cache engine.
+// tests/unit/test_cache.cpp — behavior tests for the page-cache verb engine.
 //
-// S3-style: the caller opens the fd and hands it over;
-// cache::process_file() never opens a path. The behavior pinned here comes
-// from upstream vmtouch (already pinned end-to-end by tests/run.sh); here
-// it is pinned at the module boundary so the Phase-2 rewrite is verified
-// per module.
+// S3-style: the caller opens the fd and hands it over; the verbs
+// (inspect/warm/evict/lock) never see a path. The behavior pinned here
+// comes from upstream vmtouch (already pinned end-to-end by tests/run.sh);
+// here it is pinned at the module boundary so the Phase-2 rewrite is
+// verified per module.
 //
 // scenario: S3 (mlock model loader) — caller-owned fd, distinct failure
 // reasons; S2 (QA checker) — query mode + residency numbers.
@@ -25,22 +25,21 @@ int64_t pages_for(int64_t bytes) { return (bytes + pagesize - 1) / pagesize; }
 
 TEST(cache_query_fresh_file_accounting) {
     unit::TempFile f(4);
-    unit::RecordingSink sink;
-    unit::WarningCapture warn;
-    Stats stats;
+    unit::EngineEventsRecorder ev;
+    auto r = cache::inspect(f.fd, cache::Params{}, &ev);
 
-    auto fi = unit::make_file_info(f.path, f.fd);
-    unit::WarnOf warn_adapt(warn);
-    auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  warn_adapt, sink);
-
-    EXPECT_EQ((int)st, (int)Status::Ok);
-    EXPECT_EQ(stats.total_pages, 4);          // whole file: 4 pages
-    EXPECT_EQ(sink.file_starts.size(), (size_t)1);
-    EXPECT_EQ(sink.done.size(), (size_t)1);
-    EXPECT_EQ(sink.done[0].second.first, 4);  // pages_in_file in on_file_done
-    EXPECT_TRUE(sink.evictings.empty());
-    EXPECT_TRUE(warn.empty());       // fresh 4-page file: no warnings
+    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Ok);
+    EXPECT_EQ(r.pages_total, 4);               // whole file: 4 pages
+    EXPECT_EQ(ev.file_starts, 1);
+    EXPECT_EQ((int)ev.dones.size(), 1);
+    EXPECT_EQ(ev.dones[0].first, 4);           // pages_in_file in on_file_done
+    EXPECT_EQ(ev.evictings, 0);
+    EXPECT_TRUE(static_cast<bool>(r.region));  // mapping returned to caller
+    // non-verbose: no events at all
+    unit::EngineEventsRecorder quiet_ev;
+    auto rq = cache::inspect(f.fd, cache::Params{}, nullptr);
+    EXPECT_EQ((int)rq.code, (int)cache::Result::Code::Ok);
+    EXPECT_EQ(quiet_ev.file_starts, 0);
 }
 
 TEST(cache_query_resident_count_is_consistent) {
@@ -53,21 +52,13 @@ TEST(cache_query_resident_count_is_consistent) {
         sum += static_cast<char*>(m)[off];
     munmap(m, f.size);
 
-    unit::RecordingSink sink;
-    unit::WarningCapture warn;
-    Stats stats;
-    auto fi = unit::make_file_info(f.path, f.fd);
-    unit::WarnOf warn_adapt(warn);
-    auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  warn_adapt, sink);
+    auto r = cache::inspect(f.fd, cache::Params{}, nullptr);
 
-    EXPECT_EQ((int)st, (int)Status::Ok);
-    EXPECT_EQ(stats.total_pages, 4);
+    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Ok);
+    EXPECT_EQ(r.pages_total, 4);
     // Touched 2 pages; readahead may pull in more, never fewer.
-    EXPECT_TRUE(stats.total_pages_in_core >= 2);
-    EXPECT_TRUE(stats.total_pages_in_core <= 4);
-    // on_file_done reports the same residency the stats counted.
-    EXPECT_EQ(sink.done[0].second.second, stats.total_pages_in_core);
+    EXPECT_TRUE(r.pages_resident >= 2);
+    EXPECT_TRUE(r.pages_resident <= 4);
 }
 
 TEST(cache_touch_makes_all_pages_resident) {
@@ -75,120 +66,106 @@ TEST(cache_touch_makes_all_pages_resident) {
     // Evict first so the touch has something to do (best effort; if the
     // filesystem ignores eviction the assertions still hold: a touched
     // file must end up fully resident).
-    unit::WarningCapture warn;
-    unit::WarnOf warn_adapt_evict(warn);
-    unit::RecordingSink sink_evict;
-    Stats stats_evict;
-    auto fi = unit::make_file_info(f.path, f.fd);
-    (void)cache::process_file(fi, cache::Mode::Evict, stats_evict,
-                              warn_adapt_evict, sink_evict);
+    (void)cache::evict(f.fd, cache::Params{}, nullptr);
 
-    unit::WarnOf warn_adapt_touch(warn);
-    unit::RecordingSink sink_touch;
-    Stats stats_touch;
-    auto st = cache::process_file(fi, cache::Mode::Touch, stats_touch,
-                                  warn_adapt_touch, sink_touch);
-    EXPECT_EQ((int)st, (int)Status::Ok);
-    EXPECT_EQ(stats_touch.total_pages, 3);
+    auto r = cache::warm(f.fd, cache::Params{}, nullptr);
+    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Ok);
+    EXPECT_EQ(r.pages_total, 3);
     // After -t the file must be fully resident (upstream contract). Verify
     // via a fresh query on the same fd:
-    unit::WarnOf warn_adapt_query(warn);
-    unit::RecordingSink sink_query;
-    Stats stats_query;
-    (void)cache::process_file(fi, cache::Mode::Query, stats_query,
-                              warn_adapt_query, sink_query);
-    EXPECT_EQ(stats_query.total_pages, 3);
-    EXPECT_EQ(stats_query.total_pages_in_core, 3);   // touched => all resident
+    auto q = cache::inspect(f.fd, cache::Params{}, nullptr);
+    EXPECT_EQ(q.pages_total, 3);
+    EXPECT_EQ(q.pages_resident, 3);   // touched => all resident
 }
 
 TEST(cache_empty_file_skipped_silently) {
     unit::TempFile f(0);   // zero bytes
-    unit::RecordingSink sink;
-    unit::WarningCapture warn;
-    Stats stats;
-    auto fi = unit::make_file_info(f.path, f.fd);
-    unit::WarnOf warn_adapt(warn);
-    auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  warn_adapt, sink);
-    EXPECT_EQ((int)st, (int)Status::Skipped);
-    EXPECT_TRUE(warn.empty());      // upstream: silent for empty files
-    EXPECT_TRUE(sink.file_starts.empty());
-    EXPECT_EQ(stats.total_pages, 0);
+    unit::EngineEventsRecorder ev;
+    auto r = cache::inspect(f.fd, cache::Params{}, &ev);
+
+    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Skipped);
+    EXPECT_TRUE(r.silent);              // upstream: silent for empty files
+    EXPECT_EQ(ev.file_starts, 0);
+    EXPECT_EQ(r.pages_total, 0);
 }
 
 TEST(cache_file_larger_than_max_skips_with_warning) {
     unit::TempFile f(2);
-    unit::RecordingSink sink;
-    unit::WarningCapture warn;
-    Stats stats;
-    auto fi = unit::make_file_info(f.path, f.fd);
-    fi.max_file_size = static_cast<size_t>(pagesize);   // -m 1 page
-    unit::WarnOf warn_adapt(warn);
-    auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  warn_adapt, sink);
-    EXPECT_EQ((int)st, (int)Status::Skipped);
-    EXPECT_EQ(warn.size(), (size_t)1);
-    EXPECT_EQ(warn.failures[0].kind, Failure::Kind::TooLarge);
-    EXPECT_EQ(stats.total_pages, 0);
-    EXPECT_TRUE(sink.file_starts.empty());
+    cache::Params p;
+    p.max_file_size = static_cast<size_t>(pagesize);   // -m 1 page
+    auto r = cache::inspect(f.fd, p, nullptr);
+
+    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Skipped);
+    EXPECT_FALSE(r.silent);
+    EXPECT_EQ((int)r.skip, (int)Failure::Kind::TooLarge);
+    EXPECT_EQ(r.pages_total, 0);
 }
 
 TEST(cache_offset_beyond_eof_skips_with_warning) {
     unit::TempFile f(2);
-    unit::RecordingSink sink;
-    unit::WarningCapture warn;
-    Stats stats;
-    auto fi = unit::make_file_info(f.path, f.fd, /*offset=*/10 * pagesize);
-    unit::WarnOf warn_adapt(warn);
-    auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  warn_adapt, sink);
-    EXPECT_EQ((int)st, (int)Status::Skipped);
-    EXPECT_EQ(warn.size(), (size_t)1);
-    EXPECT_EQ(warn.failures[0].kind, Failure::Kind::BeyondEof);
-    EXPECT_EQ(warn.failures[0].offset, 10 * pagesize);
-    EXPECT_EQ(stats.total_pages, 0);
+    cache::Params p;
+    p.range.offset = 10 * pagesize;
+    auto r = cache::inspect(f.fd, p, nullptr);
+
+    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Skipped);
+    EXPECT_EQ((int)r.skip, (int)Failure::Kind::BeyondEof);
+    EXPECT_EQ(r.offset, 10 * pagesize);
+    EXPECT_EQ(r.pages_total, 0);
 }
 
 TEST(cache_partial_range_counts_only_selected_pages) {
     unit::TempFile f(4);
-    unit::RecordingSink sink;
-    unit::WarningCapture warn;
-    Stats stats;
+    unit::EngineEventsRecorder ev;
     // -p second page only: offset = 1 page, max_len = 1 page
-    auto fi = unit::make_file_info(f.path, f.fd, /*offset=*/pagesize, /*max_len=*/pagesize);
-    unit::WarnOf warn_adapt(warn);
-    auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  warn_adapt, sink);
-    EXPECT_EQ((int)st, (int)Status::Ok);
-    EXPECT_EQ(stats.total_pages, 1);         // only the selected page counts
-    EXPECT_EQ(sink.done[0].second.first, 1);
+    cache::Params p;
+    p.range.offset = pagesize;
+    p.range.max_len = pagesize;
+    auto r = cache::inspect(f.fd, p, &ev);
+
+    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Ok);
+    EXPECT_EQ(r.pages_total, 1);         // only the selected page counts
+    EXPECT_EQ(ev.dones[0].first, 1);
 }
 
 TEST(cache_non_verbose_sinks_are_silent_but_stats_still_count) {
     unit::TempFile f(2);
-    unit::RecordingSink sink;
-    unit::WarningCapture warn;
-    Stats stats;
-    auto fi = unit::make_file_info(f.path, f.fd, 0, 0, /*verbose=*/false);
-    unit::WarnOf warn_adapt(warn);
-    auto st = cache::process_file(fi, cache::Mode::Query, stats,
-                                  warn_adapt, sink);
-    EXPECT_EQ((int)st, (int)Status::Ok);
-    EXPECT_EQ(stats.total_pages, 2);
-    EXPECT_TRUE(sink.file_starts.empty());   // -v off: no output calls
-    EXPECT_TRUE(sink.done.empty());
-    EXPECT_TRUE(sink.chart_page_counts.empty());
+    auto r = cache::inspect(f.fd, cache::Params{}, nullptr);
+
+    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Ok);
+    EXPECT_EQ(r.pages_total, 2);
 }
 
-// scenario: S3 (mlock model loader) — "tell me WHY mlock failed". Pinned:
-// an mlock failure surfaces as FatalError carrying the path and the errno
-// text, not as a silent skip.
+TEST(cache_mapped_region_ownership_and_move) {
+    // A2: the verbs hand the mapping back; the caller owns it.
+    unit::TempFile f(2);
+    cache::Result r = cache::inspect(f.fd, cache::Params{}, nullptr);
+    EXPECT_TRUE(static_cast<bool>(r.region));
+
+    // Move: the source loses ownership; the destination munmaps on destruction.
+    void* mem = r.region.mem();
+    int64_t len = r.region.len();
+    cache::MappedRegion moved = std::move(r.region);
+    EXPECT_FALSE(static_cast<bool>(r.region));
+    EXPECT_TRUE(static_cast<bool>(moved));
+    EXPECT_TRUE(moved.mem() == mem);     // pointer identity survives the move
+    EXPECT_EQ(moved.len(), len);
+
+    // Reading through the moved mapping still works (page 0 in core after
+    // the inspect pass — touching to be sure it is faulted in).
+    volatile char c = static_cast<char*>(moved.mem())[0];
+    (void)c;
+}
+
+// scenario: S3 (mlock model loader) — "tell me WHY mlock failed". A2: the
+// lock verb returns the mlock failure as a Fatal FACT (MlockFailed + errno);
+// the session re-adds the path and throws (pinned at session level in
+// test_session.cpp). Pinned here: the fact comes back, not an exception.
 //
 // NOTE: skipped under ASan/UBSan — ASan intercepts mlock(2) and its
 // interceptor succeeds where the real syscall would fail with ENOMEM, so
 // the failure path cannot be exercised in a sanitizer build (verified by
 // raw-syscall comparison). The no-sanitizer CI run covers this test.
-TEST(cache_lock_failure_throws_fatal_error) {
+TEST(cache_lock_failure_returns_fatal_fact) {
 #ifdef __SANITIZE_ADDRESS__
     std::printf("  skip lock-failure test (ASan intercepts mlock)\n");
     return;
@@ -206,18 +183,8 @@ TEST(cache_lock_failure_throws_fatal_error) {
         return;
     }
     unit::TempFile f(npages);
-    unit::RecordingSink sink;
-    unit::WarningCapture warn;
-    Stats stats;
-    auto fi = unit::make_file_info(f.path, f.fd);
-    unit::WarnOf warn_adapt(warn);
-    bool threw = false;
-    try {
-        (void)cache::process_file(fi, cache::Mode::Lock, stats,
-                                  warn_adapt, sink);
-    } catch (const FatalError& e) {
-        threw = true;
-        EXPECT_TRUE(std::string(e.what()).find("mlock:") != std::string::npos);
-    }
-    EXPECT_TRUE(threw);
+    auto r = cache::lock(f.fd, cache::Params{}, nullptr);
+    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Fatal);
+    EXPECT_EQ((int)r.fatal, (int)cache::Result::FatalWhat::MlockFailed);
+    EXPECT_TRUE(r.err != 0);          // errno carried back as data
 }

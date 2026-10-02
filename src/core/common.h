@@ -71,9 +71,9 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-// LEGACY (removed in A2): the pre-A1 string-warning type. Kept only so the
-// Session constructor signature compiles during the A1 transition.
-using WarnFn = std::function<void(std::string_view msg)>;
+// LEGACY (removed in A2): the pre-A1 string-warning type.
+// A1 kept it only so the Session constructor signature compiled during the
+// transition; A2 removed the constructor parameter and this alias.
 
 // ---------------------------------------------------------------------------
 // Structured failures (A1): the library reports FACTS, not strings. The CLI

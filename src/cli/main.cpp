@@ -589,8 +589,9 @@ static int run(int argc, char **argv) {
   // Options; owns the ChartSink. Failures are recorded as structured data
   // (A1); this formatter converts records to the historical text at print
   // time — the exact wording the monolith emitted.
-  g_session = std::make_unique<Session>(o, std::move(cli_filter), std::make_unique<ChartSink>(),
-      [](std::string_view msg) {});   // legacy param; removed in A2
+  g_session = std::make_unique<Session>(o, std::move(cli_filter), std::make_unique<ChartSink>());
+  // A2: no more WarnFn parameter — failures are structured records, drained
+  // and formatted below (drain_failures).
   g_session->set_range(f);
   g_crawler = std::make_unique<Crawler>(*g_session);
 

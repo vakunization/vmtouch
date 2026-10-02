@@ -102,31 +102,25 @@ struct WarningCapture {
     }
 };
 
-// FailureSink adapter over WarningCapture (A1) — for direct cache-level tests.
-struct WarnOf final : public cache::FailureSink {
-    WarningCapture* w;
-    std::string path;   // cache-level calls carry no path; attached if set
-    explicit WarnOf(WarningCapture& cap, std::string p = "")
-        : w(&cap), path(std::move(p)) {}
-    void add(Failure::Kind kind, int err, int64_t offset = 0) override {
-        w->add(Failure{kind, err, path, offset});
+// ---------------------------------------------------------------------------
+// EngineEventsRecorder (A2): path-less engine events, recorded (no
+// WarningCapture needed — cache-level tests read the Result data).
+// ---------------------------------------------------------------------------
+struct EngineEventsRecorder final : public cache::EngineEvents {
+    int file_starts = 0;
+    int evictings = 0;
+    std::vector<int64_t> chart_page_counts;
+    std::vector<std::pair<int64_t, int64_t>> dones;   // {pages, resident}
+
+    void on_file_start() override { file_starts++; }
+    void on_evicting() override { evictings++; }
+    void on_chart(std::span<const unsigned char>, int64_t pages_in_file) override {
+        chart_page_counts.push_back(pages_in_file);
+    }
+    void on_file_done(int64_t pages, int64_t resident) override {
+        dones.emplace_back(pages, resident);
     }
 };
-
-// S3-style FileInfo for an already-open fd (caller owns the fd).
-inline cache::FileInfo make_file_info(const std::string& path, int fd,
-                                      int64_t offset = 0, int64_t max_len = 0,
-                                      bool verbose = true) {
-    cache::FileInfo fi;
-    fi.path = path;
-    fi.fd = fd;
-    fi.offset = offset;
-    fi.max_len = max_len;
-    fi.max_file_size = SIZE_MAX;   // unlimited unless the test overrides
-    fi.verbose = verbose;
-    fi.lockall = false;
-    return fi;
-}
 
 // ---------------------------------------------------------------------------
 // Session wiring: Session owns its sink (unique_ptr), so the observable
@@ -162,8 +156,8 @@ make_session(std::shared_ptr<SharedSinkState> state, WarningCapture& warn,
                      // on the verbose flag (CLI coupling — Phase 3 agenda)
     auto s = std::make_unique<Session>(
         o,
-        std::make_unique<SharedSink>(std::move(state)),
-        [&warn](std::string_view) {});   // legacy WarnFn; records are read via warn
+        FileFilter{},
+        std::make_unique<SharedSink>(std::move(state)));
     s->set_range(range);
     return s;
 }
@@ -177,8 +171,8 @@ make_session(std::shared_ptr<SharedSinkState> state, WarningCapture& warn,
     if (o.verbose == 0) o.verbose = 1;   // same per-file-numbers default as above
     auto s = std::make_unique<Session>(
         o,
-        std::make_unique<SharedSink>(std::move(state)),
-        [&warn](std::string_view) {});   // legacy WarnFn; records are read via warn
+        FileFilter{},
+        std::make_unique<SharedSink>(std::move(state)));
     s->set_range(range);
     return s;
 }
