@@ -128,6 +128,8 @@ make_session(std::shared_ptr<SharedSinkState> state, WarningCapture& warn,
              const FileInfoRange& range = {}, bool quiet = false) {
     Options o;
     o.quiet = quiet;
+    o.verbose = 1;   // scenario: S1/S2 want per-file numbers; today those ride
+                     // on the verbose flag (CLI coupling — Phase 3 agenda)
     auto s = std::make_unique<Session>(
         o,
         std::make_unique<SharedSink>(std::move(state)),

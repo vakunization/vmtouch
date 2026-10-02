@@ -21,6 +21,16 @@
 
 namespace unit {
 
+// Stringify a value for failure messages: numbers via std::to_string,
+// strings/paths verbatim.
+template <class T>
+std::string to_display(const T& v) { return std::to_string(v); }
+
+inline std::string to_display(const std::string& v) { return v; }
+inline std::string to_display(const char* v) { return v; }
+inline std::string to_display(char v) { return std::string(1, v); }
+inline std::string to_display(bool v) { return v ? "true" : "false"; }
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -83,12 +93,12 @@ inline int run_all() {
 
 #define EXPECT_EQ(a, b)                                                   \
     do {                                                                  \
-        auto va_ = (a);                                                   \
-        auto vb_ = (b);                                                   \
+        const auto& va_ = (a);                                            \
+        const auto& vb_ = (b);                                            \
         if (!(va_ == vb_))                                                \
             UNIT_FAIL("EXPECT_EQ failed: '%s' != '%s'",                   \
-                      std::to_string(va_).c_str(),                        \
-                      std::to_string(vb_).c_str());                       \
+                      ::unit::to_display(va_).c_str(),                    \
+                      ::unit::to_display(vb_).c_str());                   \
     } while (0)
 
 #define EXPECT_TRUE(x)                                                    \

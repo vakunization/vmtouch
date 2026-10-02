@@ -41,6 +41,7 @@ add_executable(unit_tests
     tests/unit/test_platform.cpp
     tests/unit/test_filters.cpp
     tests/unit/test_cache.cpp
+    tests/unit/test_session.cpp
 )
 target_link_libraries(unit_tests PRIVATE vmtouch_core)
 target_include_directories(unit_tests PRIVATE src tests)
