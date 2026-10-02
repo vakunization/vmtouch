@@ -138,4 +138,24 @@ make_session(std::shared_ptr<SharedSinkState> state, WarningCapture& warn,
     return s;
 }
 
+// make_session with caller-supplied Options (the CLI's real flow: getopt
+// fills Options, then the Session is constructed from the final values).
+inline std::unique_ptr<Session>
+make_session(std::shared_ptr<SharedSinkState> state, WarningCapture& warn,
+             const Options& opts, const FileInfoRange& range = {}) {
+    Options o = opts;
+    if (o.verbose == 0) o.verbose = 1;   // same per-file-numbers default as above
+    auto s = std::make_unique<Session>(
+        o,
+        std::make_unique<SharedSink>(std::move(state)),
+        [&warn](std::string_view m) { warn.add(m); });
+    s->set_range(range);
+    return s;
+}
+
+// Convenience: a fresh shared sink state as shared_ptr.
+inline std::shared_ptr<SharedSinkState> make_shared_state() {
+    return std::make_shared<SharedSinkState>();
+}
+
 } // namespace unit
