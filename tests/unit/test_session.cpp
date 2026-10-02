@@ -28,11 +28,16 @@ struct Fixture {
 
 TEST(session_process_missing_path_warns_and_skips) {
     Fixture fx;
-    Status st = fx.session->process_file("/tmp/vmtouch-no-such-file-evar");
+    Status st = fx.session->process("/tmp/vmtouch-no-such-file-evar");
 
+    // A3: process() goes through the crawler, and a MISSING path fails at
+    // the crawl lstat — Kind::Stat, matching upstream (run.sh pins
+    // "unable to stat" for missing paths). The Kind::Open site is reached
+    // for files that stat but cannot be opened (pinned end-to-end by
+    // run.sh's unreadable-file assertion).
     EXPECT_EQ((int)st, (int)Status::Skipped);
     EXPECT_EQ(fx.session->failures().size(), (size_t)1);
-    EXPECT_EQ(fx.session->failures()[0].kind, Failure::Kind::Open);
+    EXPECT_EQ(fx.session->failures()[0].kind, Failure::Kind::Stat);
     EXPECT_EQ(fx.session->failures()[0].path, "/tmp/vmtouch-no-such-file-evar");
     EXPECT_EQ(fx.session->failures()[0].err, ENOENT);
     EXPECT_EQ(fx.session->stats().total_pages, 0);
@@ -43,7 +48,7 @@ TEST(session_process_file_end_to_end) {
     unit::TempFile f(3);
     Fixture fx;
 
-    Status st = fx.session->process_file(f.path);
+    Status st = fx.session->process(f.path);
 
     EXPECT_EQ((int)st, (int)Status::Ok);
     EXPECT_EQ(fx.session->stats().total_pages, 3);
@@ -61,7 +66,7 @@ TEST(session_range_from_set_range_selects_pages) {
     r.max_len = pagesize;
     Fixture fx(r);
 
-    Status st = fx.session->process_file(f.path);
+    Status st = fx.session->process(f.path);
 
     EXPECT_EQ((int)st, (int)Status::Ok);
     EXPECT_EQ(fx.session->stats().total_pages, 1);
@@ -78,7 +83,7 @@ TEST(session_quiet_records_even_when_quiet) {
     bad.offset = 10 * pagesize;
     fx.session->set_range(bad);
 
-    Status st = fx.session->process_file(f.path);
+    Status st = fx.session->process(f.path);
 
     EXPECT_EQ((int)st, (int)Status::Skipped);
     EXPECT_EQ(fx.session->failures().size(), (size_t)1);
@@ -98,8 +103,8 @@ TEST(session_second_file_accumulates_stats) {
     unit::TempFile b(3);
     Fixture fx;
 
-    (void)fx.session->process_file(a.path);
-    (void)fx.session->process_file(b.path);
+    (void)fx.session->process(a.path);
+    (void)fx.session->process(b.path);
 
     EXPECT_EQ(fx.session->stats().total_pages, 5);
     EXPECT_EQ(fx.state->done.size(), (size_t)2);

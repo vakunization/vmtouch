@@ -424,16 +424,15 @@ public:
 
 static ChartSink g_chart_sink;
 static std::unique_ptr<Session> g_session;
-static std::unique_ptr<Crawler> g_crawler;
 
 
 
 
 // Batch driver (-b): reads paths separated by newline or NUL (-0) from a
-// list file or stdin ("-") and walks each. This is input-driving, i.e. a
-// CLI concern: the library only ever sees walk() per path. Deliberately
+// list file or stdin ("-") and processes each. This is input-driving, i.e. a
+// CLI concern: the library only ever sees process() per path. Deliberately
 // kept OUT of src/core (no fopen under core — success criterion).
-static void walk_batch(Crawler& crawler, const Options& o, std::function<void()> drain_failures) {
+static void walk_batch(Session& session, const Options& o, std::function<void()> drain_failures) {
   FILE* f;
   char* line = NULL;
   size_t len = 0;
@@ -453,7 +452,7 @@ static void walk_batch(Crawler& crawler, const Options& o, std::function<void()>
 
   while ((read = getdelim(&line, &len, delim, f)) != -1) {
     line[read - 1] = '\0';   // strip the delimiter
-    crawler.walk(line);
+    session.process(line);
     drain_failures();
   }
 
@@ -602,10 +601,10 @@ static int run(int argc, char **argv) {
   // (A1); this formatter converts records to the historical text at print
   // time — the exact wording the monolith emitted.
   g_session = std::make_unique<Session>(o, std::move(cli_filter), std::make_unique<ChartSink>());
+  g_session->set_range(f);   // -p range applied to the session (used per file)
   // A2: no more WarnFn parameter — failures are structured records, drained
-  // and formatted below (drain_failures).
-  g_session->set_range(f);
-  g_crawler = std::make_unique<Crawler>(*g_session);
+  // and formatted below (drain_failures). A3: the crawler is internal —
+  // the session drives traversal through process().
 
   // Must be done now because mlock() not inherited across fork()
   if (o.daemon) go_daemon(o);
@@ -631,12 +630,12 @@ static int run(int argc, char **argv) {
   };
 
   auto run_one = [&](const char* path) {
-    g_crawler->walk(path);
+    g_session->process(path);
     drain_failures();
   };
 
   if (o.batch) {
-      walk_batch(*g_crawler, o, drain_failures);
+      walk_batch(*g_session, o, drain_failures);
       drain_failures();
   }
 
@@ -670,11 +669,12 @@ static int run(int argc, char **argv) {
     exit(0);
   }
 
+  const Session::Report rep = g_session->report();   // A3: totals via report()
   if (!o.quiet) {
     if (o.output == NULL) {
       if (o.verbose) printf("\n");
-      printf("           Files: %" PRId64 "\n", g_crawler->total_files());
-      printf("     Directories: %" PRId64 "\n", g_crawler->total_dirs());
+      printf("           Files: %" PRId64 "\n", rep.total_files);
+      printf("     Directories: %" PRId64 "\n", rep.total_dirs);
       if (o.touch)
         printf("   Touched Pages: %" PRId64 " (%s)\n", s_stats.total_pages, pretty_print_size(total_pages_size));
       else if (o.evict)
@@ -693,7 +693,7 @@ static int run(int argc, char **argv) {
                    o.evict ? "Evicted" :
                              "Resident";
       printf("Files=%" PRId64 " Directories=%" PRId64 " %sPages=%" PRId64 " TotalPages=%" PRId64 " %sSize=%" PRId64 " TotalSize=%" PRId64 " %sPercent=%.3g Elapsed=%.5g\n", 
-       g_crawler->total_files(), g_crawler->total_dirs(), desc, s_stats.total_pages_in_core, s_stats.total_pages, desc, total_pages_in_core_size, total_pages_size, desc, total_pages_in_core_perc, elapsed);
+       rep.total_files, rep.total_dirs, desc, s_stats.total_pages_in_core, s_stats.total_pages, desc, total_pages_in_core_size, total_pages_size, desc, total_pages_in_core_perc, elapsed);
     }
   }
 

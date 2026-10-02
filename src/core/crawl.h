@@ -1,19 +1,21 @@
-// core/crawl.h — filesystem traversal for the vmtouch core library.
+// core/crawl.h — filesystem traversal (INTERNAL since A3).
 //
-// Crawler owns its traversal state (depth stack, seen-inodes dedup tree,
-// device pinning, file/dir totals) and holds references to the Session
-// (which performs the per-file work) and the FileFilter. Ownership rule
-// (agreed): the Crawler must not outlive the Session.
+// The Crawler is owned by Session (unique_ptr member) and is no longer
+// part of the library's public surface. It owns the traversal state
+// (depth stack, seen-inodes dedup tree, device pinning, file/dir totals)
+// and holds a reference to the Session (which performs the per-file work
+// and records failures). Lifetime: destroyed with the Session — it can
+// never outlive it.
 //
 // The traversal logic is transplanted verbatim from the monolith's
 // vmtouch_crawl(): trailing-slash strip, symlink handling, -F same-
 // filesystem check, hardlink dedup (st_nlink > 1), symlink-loop detection,
 // MAX_CRAWL_DEPTH. Deviations required by the seam:
-//   * warning() -> Session::warning() (quiet handled there);
+//   * warning() -> Session::fail() records (quiet handled by the CLI);
 //   * fatal()   -> throw FatalError (single handler in the CLI);
-//   * per-file work -> Session::process_file() instead of vmtouch_file();
-//   * the seen-inodes tsearch tree lives in CrawlState and is freed in its
-//     destructor (replacing the atexit workaround from the leak fix).
+//   * per-file work -> Session::process_file() (private, friend access);
+//   * the seen-inodes tsearch tree is freed in the destructor (replacing
+//     the atexit workaround from the leak fix).
 
 #pragma once
 
@@ -22,7 +24,8 @@
 #include <search.h>   // tsearch/tfind/tdestroy
 
 #include "common.h"
-#include "session.h"
+
+class Session;
 
 class Crawler {
 public:

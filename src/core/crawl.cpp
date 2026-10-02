@@ -2,6 +2,8 @@
 
 #include "crawl.h"
 
+#include "session.h"
+
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>

@@ -1,14 +1,16 @@
 // core/session.cpp — see session.h.
 //
-// process_file() opens the path (O_NOATIME + EPERM fallback, EMFILE/ENFILE
-// rlimit retry loop lives HERE, as designed), then dispatches to one of the
-// four cache verbs and CLASSIFIES the returned data:
+// A3: the public surface is process()/process_fd()/report(). The per-file
+// pipeline (open with O_NOATIME + EPERM fallback, EMFILE/ENFILE rlimit
+// retry loop lives HERE, as designed) is shared by process_file() and
+// process_fd() through run_verb_on_fd():
 //   * Ok        -> stats absorbed, region kept iff lock/lockall, else dropped;
 //   * Skipped   -> Failure record (unless silent), Status::Skipped;
 //   * Fatal     -> the session re-adds the path and throws FatalError with
 //                  the historical message text;
 //   * mincore_inaccurate / evict_failed -> Failure records (Ok still).
-// The fd is owned by this function and closed on every exit path.
+// process_file() owns the fd it opens and closes it on every exit path.
+// process_fd() never closes (the fd stays the caller's, S3 contract).
 
 #include "session.h"
 
@@ -77,9 +79,50 @@ struct Session::PathBoundEvents final : public cache::EngineEvents {
 
 Session::Session(Options opts, FileFilter filter,
                  std::unique_ptr<cache::ProgressSink> sink)
-    : opts_(opts), sink_(std::move(sink)), filter_(std::move(filter)) {}
+    : opts_(opts), sink_(std::move(sink)), filter_(std::move(filter)),
+      crawler_(std::make_unique<Crawler>(*this)) {}
 
 Session::~Session() = default;
+
+// ---- A3 public surface ------------------------------------------------------
+
+Status Session::process(const std::string& path) {
+    // Contract (preserves the old process_file semantics at the A3 API):
+    // Skipped iff this call recorded new failures (the path or something in
+    // its subtree was skipped), Ok if everything processed. FatalError
+    // propagates; the CLI exit code is unaffected either way (run.sh pins
+    // "missing path exits 0").
+    const size_t before = failures_.size();
+    crawler_->walk(path);
+    return failures_.size() > before ? Status::Skipped : Status::Ok;
+}
+
+Status Session::process_fd(int fd, int64_t offset, int64_t max_len) {
+    // S3: the fd is the caller's — never closed here, never re-opened by
+    // path. Range policy comes from the caller (offset/max_len); size
+    // policy (-m) and the verb follow the session's options, exactly like
+    // process_file().
+    if (fd < 0) {
+        fail(Failure::Kind::Open, EBADF, "", offset);
+        return Status::Skipped;
+    }
+    FileInfoRange range;
+    range.offset = offset;
+    range.max_len = max_len;
+    return run_verb_on_fd(fd, "", range);   // no path context: "" for records
+}
+
+Session::Report Session::report() const {
+    Report r;
+    if (crawler_) {
+        r.total_files = crawler_->total_files();
+        r.total_dirs = crawler_->total_dirs();
+    }
+    r.stats = stats_;
+    return r;
+}
+
+// ---- per-file pipeline -------------------------------------------------------
 
 Status Session::process_file(const std::string& path) {
     int open_flags = O_RDONLY;
@@ -116,10 +159,23 @@ Status Session::process_file(const std::string& path) {
         return Status::Skipped;
     }
 
-    // ---- dispatch to the verb and classify the returned data -------------
+    // fd is owned from here: closed on every exit path below.
+    Status st;
+    try {
+        st = run_verb_on_fd(fd, path, range_);
+    } catch (...) {
+        close(fd);
+        throw;
+    }
+    close(fd);
+    return st;
+}
 
+Status Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRange& range) {
+    // Shared verb dispatch + classification (A3): used by process_file()
+    // (fd opened above) and process_fd() (caller-owned fd, S3).
     cache::Params params;
-    params.range = range_;
+    params.range = range;
     params.max_file_size = opts_.max_file_size;
 
     // Verbose gating, exactly the old FileInfo.verbose:
@@ -178,11 +234,9 @@ Status Session::process_file(const std::string& path) {
             st = Status::Skipped;
         }
     } catch (...) {
-        close(fd);
-        throw;
+        throw;   // fd ownership stays with the caller of run_verb_on_fd
     }
 
-    close(fd);
     return st;
 }
 
