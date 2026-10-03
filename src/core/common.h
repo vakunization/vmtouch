@@ -65,7 +65,7 @@ struct FileInfoRange {
 };
 
 // Result codes returned by core entry points (cache/session).
-enum class Status {
+enum class Status : int32_t {
     Ok = 0,        // file/directory processed
     Skipped = 1,   // not processed; a warning was already emitted (or silence is correct)
 };
@@ -90,7 +90,7 @@ public:
 // Phase-3 C enum maps 1:1.
 // ---------------------------------------------------------------------------
 struct Failure {
-    enum class Kind : int {
+    enum class Kind : int32_t {
         Open = 1,             // unable to open
         Stat = 2,             // unable to stat (crawl lstat/stat)
         Map = 3,              // unable to mmap
@@ -116,7 +116,7 @@ struct Failure {
         EvictInvalidateFailed = 19, // unable to msync invalidate file PATH (ERR)
     };
     Kind        kind;
-    int         err = 0;    // errno, 0 if not applicable
+    int32_t     err = 0;    // errno, 0 if not applicable
     std::string path;       // empty for fd-based ops
     int64_t     offset = 0; // for range problems (BeyondEof)
 };

@@ -6,10 +6,10 @@
 // the monolith's vmtouch_file()). Deliberate deviations, each required by
 // the A2 seam:
 //   * no path: fatal messages that historically embedded the path now come
-//     back as Result::fatal facts; the session re-adds the path;
+//     back as FileResult::fatal facts; the session re-adds the path;
 //   * no verbose flag: progress events fire iff the EngineEvents pointer
 //     is non-null (the session's adapter binds the sink + path);
-//   * stats are returned as data (Result fields), not mutated in place;
+//   * stats are returned as data (FileResult fields), not mutated in place;
 //   * the mapping is RETURNED (MappedRegion), never munmapped here — the
 //     session drops or keeps it exactly where upstream's bail-out did.
 // A1's coarse Failure kinds are kept as-is (known, user-parked question:
@@ -55,11 +55,11 @@ struct Mapping {
 
 // Shared prelude: fstat -> block-device size -> empty -> -m -> range ->
 // mmap. Returns Ok (mapping established) or the skip/fatal fact.
-Result prelude(int fd, const Params& p, Mapping& m) {
+FileResult prelude(int fd, const Params& p, Mapping& m) {
     struct stat sb;
     if (fstat(fd, &sb)) {
-        Result r;
-        r.code = Result::Code::Skipped;
+        FileResult r;
+        r.code = FileResult::Code::Skipped;
         r.skip = Failure::Kind::FstatFailed;   // upstream: "unable to fstat ... skipping"
         r.err = errno;
         return r;
@@ -69,8 +69,8 @@ Result prelude(int fd, const Params& p, Mapping& m) {
     if (S_ISBLK(sb.st_mode)) {
 #if defined(__linux__)
         if (ioctl(fd, BLKGETSIZE64, &m.len_of_file)) {
-            Result r;
-            r.code = Result::Code::Skipped;
+            FileResult r;
+            r.code = FileResult::Code::Skipped;
             r.skip = Failure::Kind::IoctlSizeFailed;   // upstream: "unable to ioctl"
             r.err = errno;
             return r;
@@ -83,15 +83,15 @@ Result prelude(int fd, const Params& p, Mapping& m) {
     }
 
     if (m.len_of_file == 0) {
-        Result r;                                   // empty: silent skip, as upstream
-        r.code = Result::Code::Skipped;
+        FileResult r;                                   // empty: silent skip, as upstream
+        r.code = FileResult::Code::Skipped;
         r.silent = true;
         return r;
     }
 
     if (static_cast<uint64_t>(m.len_of_file) > p.max_file_size) {
-        Result r;
-        r.code = Result::Code::Skipped;
+        FileResult r;
+        r.code = FileResult::Code::Skipped;
         r.skip = Failure::Kind::TooLarge;
         return r;
     }
@@ -101,8 +101,8 @@ Result prelude(int fd, const Params& p, Mapping& m) {
     if (p.range.max_len > 0 && (p.range.offset + p.range.max_len) < m.len_of_file) {
         m.len_of_range = p.range.max_len;
     } else if (p.range.offset >= m.len_of_file) {
-        Result r;
-        r.code = Result::Code::Skipped;
+        FileResult r;
+        r.code = FileResult::Code::Skipped;
         r.skip = Failure::Kind::BeyondEof;
         r.offset = p.range.offset;
         return r;
@@ -115,23 +115,23 @@ Result prelude(int fd, const Params& p, Mapping& m) {
     void* mem = mmap(NULL, m.len_of_range, PROT_READ, MAP_SHARED, fd, p.range.offset);
 
     if (mem == MAP_FAILED) {
-        Result r;
-        r.code = Result::Code::Skipped;
+        FileResult r;
+        r.code = FileResult::Code::Skipped;
         r.skip = Failure::Kind::Map;
         r.err = errno;
         return r;
     }
 
     if (!platform::aligned_p(mem)) {
-        Result r;                                   // session re-adds the path
-        r.code = Result::Code::Fatal;
-        r.fatal = Result::FatalWhat::MisalignedMap;
+        FileResult r;                                   // session re-adds the path
+        r.code = FileResult::Code::Fatal;
+        r.fatal = FileResult::FatalWhat::MisalignedMap;
         return r;
     }
 
     m.region = MappedRegion(mem, m.len_of_range);
     m.pages_in_range = bytes2pages(m.len_of_range);
-    return Result{};
+    return FileResult{};
 }
 
 // mincore pass shared by inspect/warm/lock: counts residency, fires the
@@ -139,9 +139,9 @@ Result prelude(int fd, const Params& p, Mapping& m) {
 // touch-read loop (the feature itself) with the throttled live chart.
 // Returns the Fatal fact for mincore failure (or throws for allocation
 // failure, as before).
-Result mincore_pass(const Mapping& m, bool touch, EngineEvents* ev,
+FileResult mincore_pass(const Mapping& m, bool touch, EngineEvents* ev,
                     int64_t& pages_resident_out) {
-    Result r;
+    FileResult r;
     double last_chart_print_time = 0.0;
 
     auto* mincore_array = static_cast<unsigned char*>(malloc(m.pages_in_range));
@@ -151,8 +151,8 @@ Result mincore_pass(const Mapping& m, bool touch, EngineEvents* ev,
     // 3rd arg to mincore is char* on BSD and unsigned char* on linux
     if (mincore(m.region.mem(), m.len_of_range, mincore_array)) {
         free(mincore_array);
-        r.code = Result::Code::Fatal;
-        r.fatal = Result::FatalWhat::MincoreFailed;   // session re-adds the path
+        r.code = FileResult::Code::Fatal;
+        r.fatal = FileResult::FatalWhat::MincoreFailed;   // session re-adds the path
         r.err = errno;
         return r;
     }
@@ -218,14 +218,14 @@ Result mincore_pass(const Mapping& m, bool touch, EngineEvents* ev,
 // The four verbs.
 // ---------------------------------------------------------------------------
 
-Result inspect(int fd, const Params& p, EngineEvents* ev) {
+FileResult inspect(int fd, const Params& p, EngineEvents* ev) {
     Mapping m;
-    if (Result r = prelude(fd, p, m); r.code != Result::Code::Ok)
+    if (FileResult r = prelude(fd, p, m); r.code != FileResult::Code::Ok)
         return r;
 
     int64_t pages_resident = 0;
-    Result r = mincore_pass(m, /*touch=*/false, ev, pages_resident);
-    if (r.code == Result::Code::Fatal)
+    FileResult r = mincore_pass(m, /*touch=*/false, ev, pages_resident);
+    if (r.code == FileResult::Code::Fatal)
         return r;
 
     r.pages_total = m.pages_in_range;
@@ -234,14 +234,14 @@ Result inspect(int fd, const Params& p, EngineEvents* ev) {
     return r;
 }
 
-Result warm(int fd, const Params& p, EngineEvents* ev) {
+FileResult warm(int fd, const Params& p, EngineEvents* ev) {
     Mapping m;
-    if (Result r = prelude(fd, p, m); r.code != Result::Code::Ok)
+    if (FileResult r = prelude(fd, p, m); r.code != FileResult::Code::Ok)
         return r;
 
     int64_t pages_resident = 0;
-    Result r = mincore_pass(m, /*touch=*/true, ev, pages_resident);
-    if (r.code == Result::Code::Fatal)
+    FileResult r = mincore_pass(m, /*touch=*/true, ev, pages_resident);
+    if (r.code == FileResult::Code::Fatal)
         return r;
 
     r.pages_total = m.pages_in_range;
@@ -250,14 +250,14 @@ Result warm(int fd, const Params& p, EngineEvents* ev) {
     return r;
 }
 
-Result evict(int fd, const Params& p, EngineEvents* ev) {
+FileResult evict(int fd, const Params& p, EngineEvents* ev) {
     Mapping m;
-    if (Result r = prelude(fd, p, m); r.code != Result::Code::Ok)
+    if (FileResult r = prelude(fd, p, m); r.code != FileResult::Code::Ok)
         return r;
 
     if (ev) ev->on_evicting();
 
-    Result r;
+    FileResult r;
 #if defined(__linux__) || defined(__hpux)
     if (posix_fadvise(fd, p.range.offset, m.len_of_range, POSIX_FADV_DONTNEED)) {
         r.evict_failed = true;
@@ -279,19 +279,19 @@ Result evict(int fd, const Params& p, EngineEvents* ev) {
     return r;
 }
 
-Result lock(int fd, const Params& p, EngineEvents* ev) {
+FileResult lock(int fd, const Params& p, EngineEvents* ev) {
     Mapping m;
-    if (Result r = prelude(fd, p, m); r.code != Result::Code::Ok)
+    if (FileResult r = prelude(fd, p, m); r.code != FileResult::Code::Ok)
         return r;
 
     int64_t pages_resident = 0;
-    Result r = mincore_pass(m, /*touch=*/true, ev, pages_resident);   // -l implies touch
-    if (r.code == Result::Code::Fatal)
+    FileResult r = mincore_pass(m, /*touch=*/true, ev, pages_resident);   // -l implies touch
+    if (r.code == FileResult::Code::Fatal)
         return r;
 
     if (mlock(m.region.mem(), m.len_of_range)) {
-        r.code = Result::Code::Fatal;
-        r.fatal = Result::FatalWhat::MlockFailed;     // session re-adds the path
+        r.code = FileResult::Code::Fatal;
+        r.fatal = FileResult::FatalWhat::MlockFailed;     // session re-adds the path
         r.err = errno;
         return r;
     }

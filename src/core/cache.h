@@ -8,7 +8,7 @@
 //
 // Rules that survive from the Increment-1 engine:
 //   * no printing, no exit(), no CLI state, and now no paths;
-//   * hopeless situations either come back as fatal facts in the Result
+//   * hopeless situations either come back as fatal facts in the FileResult
 //     (when the historical message contained the path — the session
 //     re-adds it) or throw FatalError (already path-less text);
 //   * recoverable skips come back as data (Kind + errno), never strings.
@@ -89,23 +89,33 @@ private:
     int64_t len_ = 0;
 };
 
-// Verb result: PLAIN DATA. Internal shape until A5 formalizes FileResult.
-struct Result {
-    enum class Code : int { Ok = 0, Skipped = 1, Fatal = 2 };
+// The four internal verbs (A5: the enum is the frozen vocabulary — see
+// docs/vocabulary.md for the C mapping; explicit values, fixed width).
+enum class Verb : int32_t {
+    Inspect = 1,   // query residency (no -t/-e/-l)
+    Warm    = 2,   // -t: touch pages into cache
+    Evict   = 3,   // -e: drop pages from cache
+    Lock    = 4,   // -l: touch + mlock, mapping kept
+};
+
+// Verb result: PLAIN DATA (A5: FileResult is the frozen vocabulary name;
+// field order is the documentation order — see docs/vocabulary.md).
+struct FileResult {
+    enum class Code : int32_t { Ok = 0, Skipped = 1, Fatal = 2 };
     Code code = Code::Ok;
 
     // --- Skipped: the session turns this into a Failure record ----------
     bool silent = false;                        // empty file: skip, NO record
     Failure::Kind skip = Failure::Kind::Stat;   // which record (when !silent)
-    int err = 0;                                // errno
+    int32_t err = 0;                            // errno
     int64_t offset = 0;                         // BeyondEof
 
     // --- Fatal: the session classifies and re-adds path context ---------
-    enum class FatalWhat : int {
+    enum class FatalWhat : int32_t {
         None = 0,
-        MlockFailed,        // err = errno; msg "mlock: PATH (ERR)"
-        MincoreFailed,      // err = errno; msg "mincore PATH (ERR)"
-        MisalignedMap,      // msg "mmap(PATH) wasn't page aligned"
+        MlockFailed = 1,    // err = errno; msg "mlock: PATH (ERR)"
+        MincoreFailed = 2,  // err = errno; msg "mincore PATH (ERR)"
+        MisalignedMap = 3,  // msg "mmap(PATH) wasn't page aligned"
     };
     FatalWhat fatal = FatalWhat::None;
 
@@ -169,9 +179,9 @@ public:
 // alignment). Hopeless platform situations still throw path-less
 // FatalError (allocation failure, block-device size on non-Linux,
 // unsupported eviction platform).
-Result inspect(int fd, const Params& p, EngineEvents* ev);   // query residency
-Result warm(int fd, const Params& p, EngineEvents* ev);      // -t: touch pages
-Result evict(int fd, const Params& p, EngineEvents* ev);     // -e
-Result lock(int fd, const Params& p, EngineEvents* ev);      // -l: mlock + region
+FileResult inspect(int fd, const Params& p, EngineEvents* ev);   // Verb::Inspect
+FileResult warm(int fd, const Params& p, EngineEvents* ev);      // Verb::Warm (-t)
+FileResult evict(int fd, const Params& p, EngineEvents* ev);     // Verb::Evict (-e)
+FileResult lock(int fd, const Params& p, EngineEvents* ev);      // Verb::Lock (-l)
 
 } // namespace cache

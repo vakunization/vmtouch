@@ -24,15 +24,13 @@
 
 namespace {
 
-// A2: the verb choice is a session-local detail (the engine's public
-// surface is the four verbs themselves).
-enum class Verb { Query, Touch, Evict, Lock };
-
-Verb verb_from_options(const Options& o) {
-    if (o.evict) return Verb::Evict;
-    if (o.lock)  return Verb::Lock;
-    if (o.touch) return Verb::Touch;
-    return Verb::Query;
+// A5: the verb vocabulary is cache::Verb (docs/vocabulary.md); the
+// Options->Verb mapping lives here (session policy).
+cache::Verb verb_from_options(const Options& o) {
+    if (o.evict) return cache::Verb::Evict;
+    if (o.lock)  return cache::Verb::Lock;
+    if (o.touch) return cache::Verb::Warm;
+    return cache::Verb::Inspect;
 }
 
 // Translates the rlimit outcome into the monolith's exact fatal messages.
@@ -184,19 +182,19 @@ Status Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRa
                                   ? static_cast<cache::EngineEvents*>(&adapter)
                                   : nullptr;
 
-    const Verb verb = verb_from_options(opts_);
+    const cache::Verb verb = verb_from_options(opts_);
 
     Status st;
     try {
-        cache::Result r;
+        cache::FileResult r;
         switch (verb) {
-            case Verb::Query: r = cache::inspect(fd, params, ev); break;
-            case Verb::Touch: r = cache::warm(fd, params, ev);    break;
-            case Verb::Evict: r = cache::evict(fd, params, ev);   break;
-            case Verb::Lock:  r = cache::lock(fd, params, ev);    break;
+            case cache::Verb::Inspect: r = cache::inspect(fd, params, ev); break;
+            case cache::Verb::Warm:    r = cache::warm(fd, params, ev);    break;
+            case cache::Verb::Evict:   r = cache::evict(fd, params, ev);   break;
+            case cache::Verb::Lock:    r = cache::lock(fd, params, ev);    break;
         }
 
-        if (r.code == cache::Result::Code::Fatal) {
+        if (r.code == cache::FileResult::Code::Fatal) {
             // The verb lost the path (A2); the session re-adds it with the
             // historical message text.
             throw_fatal(r, path);
@@ -224,7 +222,7 @@ Status Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRa
                 fail(Failure::Kind::MunmapFailed, munmap_err, path);
         }
 
-        if (r.code == cache::Result::Code::Ok) {
+        if (r.code == cache::FileResult::Code::Ok) {
             st = Status::Ok;
         } else if (r.silent) {
             st = Status::Skipped;     // silent skip: no record (empty file)
@@ -239,15 +237,15 @@ Status Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRa
     return st;
 }
 
-void Session::throw_fatal(const cache::Result& r, const std::string& path) {
+void Session::throw_fatal(const cache::FileResult& r, const std::string& path) {
     switch (r.fatal) {
-        case cache::Result::FatalWhat::MlockFailed:
+        case cache::FileResult::FatalWhat::MlockFailed:
             throw FatalError("mlock: " + path + " (" + strerror(r.err) + ")");
-        case cache::Result::FatalWhat::MincoreFailed:
+        case cache::FileResult::FatalWhat::MincoreFailed:
             throw FatalError("mincore " + path + " (" + strerror(r.err) + ")");
-        case cache::Result::FatalWhat::MisalignedMap:
+        case cache::FileResult::FatalWhat::MisalignedMap:
             throw FatalError("mmap(" + path + ") wasn't page aligned");
-        case cache::Result::FatalWhat::None:
+        case cache::FileResult::FatalWhat::None:
             break;
     }
     throw FatalError("unexpected fatal fact");

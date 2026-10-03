@@ -96,7 +96,7 @@ private:
 
     // A2: translate a verb's fatal fact back into the historical message
     // (the verb lost the path; the session re-adds it).
-    [[noreturn]] void throw_fatal(const cache::Result& r, const std::string& path);
+    [[noreturn]] void throw_fatal(const cache::FileResult& r, const std::string& path);
 
     // A3: shared verb dispatch + classification for an ALREADY-OPEN fd.
     // Does not close the fd — the open-path owner (process_file) or the
