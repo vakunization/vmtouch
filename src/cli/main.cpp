@@ -72,6 +72,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #include <sys/utsname.h>
 #endif
 
+#include "cli_options.h"
 #include "core/common.h"
 #include "core/platform.h"
 #include "core/cache.h"
@@ -87,8 +88,8 @@ int daemon_pid;
 
 
 // wait is passed explicitly: this must work both in the daemon child (which
-// owns `o`) and from main()'s catch handler without any global Options*.
-void send_exit_signal(const Options& o, char code) {
+// owns `o`) and from main()'s catch handler without any global CliOptions*.
+void send_exit_signal(const CliOptions& o, char code) {
   if (daemon_pid == 0 && o.wait) {
     if (write(exit_pipe[1], &code, 1) < 0)
       fprintf(stderr, "vmtouch: FATAL: write: %s", strerror(errno));
@@ -107,11 +108,6 @@ void usage() {
   printf("  -d daemon mode\n");
   printf("  -m <size> max file size to touch\n");
   printf("  -p <range> use the specified portion instead of the entire file\n");
-  printf("  -f follow symbolic links\n");
-  printf("  -F don't crawl different filesystems\n");
-  printf("  -h also count hardlinked copies\n");
-  printf("  -i <pattern> ignores files and directories that match this pattern\n");
-  printf("  -I <pattern> only process files that match this pattern\n");
   printf("  -b <list file> get files or directories from the list file\n");
   printf("  -0 in batch mode (-b) separate paths with NUL byte instead of newline\n");
   printf("  -w wait until all pages are locked (only useful together with -d)\n");
@@ -242,7 +238,7 @@ static int wait_for_child() {
   return exit_value;
 }
 
-void go_daemon(Options& o) {
+void go_daemon(CliOptions& o) {
   daemon_pid = fork();
   if (daemon_pid == -1)
     fatal("fork: %s", strerror(errno));
@@ -415,7 +411,7 @@ static std::unique_ptr<Session> g_session;
 // kept OUT of src/core (no fopen under core — success criterion).
 // B4: batch paths accumulate into `extra` — the CLI makes ONE process()
 // call with all roots (argv + batch), preserving cross-root dedup.
-static void read_batch_paths(const Options& o, std::vector<std::string>& extra) {
+static void read_batch_paths(const CliOptions& o, std::vector<std::string>& extra) {
   FILE* f;
   char* line = NULL;
   size_t len = 0;
@@ -443,7 +439,7 @@ static void read_batch_paths(const Options& o, std::vector<std::string>& extra) 
     fclose(f);
 }
 
-static void remove_pidfile(Options& o) {
+static void remove_pidfile(CliOptions& o) {
   int res = 0;
 
   res = unlink(o.pidfile);
@@ -452,7 +448,7 @@ static void remove_pidfile(Options& o) {
   }
 }
 
-static void write_pidfile(Options& o) {
+static void write_pidfile(CliOptions& o) {
   FILE *f = NULL;
 
 
@@ -476,14 +472,14 @@ static void write_pidfile(Options& o) {
 // one narrow file-scope pointer. It is assigned only here, immediately
 // before sigaction registration, and only when -P is in use — replacing the
 // old never-assigned o_ptr (null deref on every fatal path, caught by UBSan).
-static const Options* g_pidfile_options = nullptr;
+static const CliOptions* g_pidfile_options = nullptr;
 
 static void signal_handler_clear_pidfile(int) {
   if (g_pidfile_options)
-    remove_pidfile(const_cast<Options&>(*g_pidfile_options));
+    remove_pidfile(const_cast<CliOptions&>(*g_pidfile_options));
 }
 
-static void register_signals_for_pidfile(const Options& o) {
+static void register_signals_for_pidfile(const CliOptions& o) {
   g_pidfile_options = &o;
   struct sigaction sa = {};
   sa.sa_handler = signal_handler_clear_pidfile;
@@ -505,7 +501,8 @@ static int run(int argc, char **argv) {
   struct timeval start_time;
   struct timeval end_time;
 
-  Options o;
+  CliOptions o;          // CLI-level state (B5: no longer rides on core Options)
+  Options lib_opts;      // the library's Options (verb/range/max_file_size/collect)
   FileInfoRange f;
 
   if (pipe(exit_pipe))
@@ -513,7 +510,9 @@ static int run(int argc, char **argv) {
 
   platform::init();
 
-  while((ch = getopt(argc, argv, "tevqlLdfFh0i:I:p:b:m:P:wo:")) != -1) {
+  // B5: -f/-F/-h/-i/-I are GONE (fixed traversal policy per the ratified
+  // spec; getopt rejects them as unknown options -> usage).
+  while((ch = getopt(argc, argv, "tevqlLd0p:b:m:P:wo:")) != -1) {
     switch(ch) {
       case '?': usage(); break;
       case 't': o.touch = 1; break;
@@ -525,16 +524,11 @@ static int run(int argc, char **argv) {
       case 'L': o.lockall = 1;
                 o.touch = 1; break;
       case 'd': o.daemon = 1; break;
-      case 'f': o.followsymlinks = 1; break;
-      case 'F': o.singlefilesystem = 1; break;
-      case 'h': o.ignorehardlinkeduplictes = 1; break;
       case 'p': parse_range(optarg, f); break;
-      case 'i': parse_ignore_item(optarg, o); break;
-      case 'I': parse_filename_filter_item(optarg, o); break;
       case 'm': {
         int64_t val = parse_size(optarg);
-        o.max_file_size = (size_t) val;
-        if (val != (int64_t) o.max_file_size) fatal("value for -m too big to fit in a size_t");
+        lib_opts.max_file_size = (size_t) val;
+        if (val != (int64_t) lib_opts.max_file_size) fatal("value for -m too big to fit in a size_t");
         break;
       }
       case 'w': o.wait = 1; break;
@@ -578,16 +572,16 @@ static int run(int argc, char **argv) {
   }
 
   // Session created AFTER option parsing/validation so it holds the final
-  // Options (B4: verb/range/max_file_size/collect_failures + interim CLI
-  // flags). ONE process() call carries all roots (argv + batch): cross-root
-  // dedup + one Report.
-  o.range = f;
-  o.collect_failures = true;   // the CLI always drains records (quiet gates printing)
-  if (o.touch || o.lock || o.lockall) o.verb = Options::Verb::Warm;
-  if (o.evict) o.verb = Options::Verb::Evict;
-  if (o.lock) o.verb = Options::Verb::Lock;
-  if (o.lockall) o.verb = Options::Verb::Warm;   // ratified: -L -> Warm; CLI mlockalls after
-  g_session = std::make_unique<Session>(o);
+  // library Options (B5: verb/range/max_file_size/collect_failures — CLI
+  // state lives in CliOptions now). ONE process() call carries all roots
+  // (argv + batch): cross-root dedup + one Report.
+  lib_opts.range = f;
+  lib_opts.collect_failures = true;   // the CLI drains records (quiet gates printing)
+  if (o.touch) lib_opts.verb = Options::Verb::Warm;
+  if (o.evict) lib_opts.verb = Options::Verb::Evict;
+  if (o.lock)  lib_opts.verb = Options::Verb::Lock;
+  if (o.lockall) lib_opts.verb = Options::Verb::Warm;   // ratified: -L -> Warm; CLI mlockalls after
+  g_session = std::make_unique<Session>(lib_opts);
 
   // Must be done now because mlock() not inherited across fork()
   if (o.daemon) go_daemon(o);

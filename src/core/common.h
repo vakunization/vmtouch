@@ -40,31 +40,14 @@ struct dev_and_inode {
 };
 
 struct Options {
-    // B4 (spec2 §2.1): the library-level Options. One verb per call.
-    // CLI-level flags (quiet/verbose/output/daemon/pidfile/batch) stay in
-    // the CLI until B5 deletes them from this struct.
+    // B5 (spec2 §2.1, final): the library-level Options — nothing else.
+    // The CLI owns all its own state locally (quiet/verbose/output/daemon/
+    // pidfile/batch), never in the library's Options.
     enum class Verb { Inspect, Warm, Evict, Lock };
     Verb verb = Verb::Inspect;
     FileInfoRange range{};               // {0,0} = whole file
     size_t max_file_size = SIZE_MAX;
     bool collect_failures = false;
-
-    // ---- B4 interim (deleted in B5): CLI-level state still riding along
-    bool touch = 0;
-    bool evict = 0;
-    bool quiet = 0;
-    int verbose = 0;
-    bool lock = 0;
-    bool lockall = 0;
-    bool daemon = 0;
-    bool followsymlinks = 0;      // inert (flags dropped per ratified spec)
-    bool singlefilesystem = 0;    // inert
-    bool ignorehardlinkeduplictes = 0;   // spelling preserved from upstream; inert
-    bool wait = 0;
-    const char* batch = nullptr;
-    const char* pidfile = nullptr;
-    const char* output = nullptr;
-    int zero_delim = 0;
 };
 
 // Result codes returned by core entry points (cache/session).

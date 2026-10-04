@@ -19,13 +19,6 @@
 
 namespace {
 
-cache::Verb verb_from_options(const Options& o) {
-    if (o.evict) return cache::Verb::Evict;
-    if (o.lock)  return cache::Verb::Lock;
-    if (o.touch) return cache::Verb::Warm;
-    return cache::Verb::Inspect;
-}
-
 double wall_seconds_since(const std::chrono::steady_clock::time_point& t) {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
 }
@@ -141,7 +134,18 @@ bool Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRang
     params.range = range;
     params.max_file_size = opts_.max_file_size;
 
-    const cache::Verb verb = verb_from_options(opts_);
+    // Options::Verb (call policy, spec2 §2.1) -> cache::Verb (frozen engine
+    // vocabulary, docs/vocabulary.md). Two enums on purpose: the engine's
+    // is ABI-frozen; the Options one is free to grow CLI-level variants.
+    const cache::Verb verb = [&] {
+        switch (opts_.verb) {
+            case Options::Verb::Inspect: return cache::Verb::Inspect;
+            case Options::Verb::Warm:    return cache::Verb::Warm;
+            case Options::Verb::Evict:   return cache::Verb::Evict;
+            case Options::Verb::Lock:    return cache::Verb::Lock;
+        }
+        throw FatalError("unreachable verb");
+    }();
 
     vmt::Result<cache::VerbOutcome> res = [&] {
         switch (verb) {

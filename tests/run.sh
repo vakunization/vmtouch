@@ -131,11 +131,11 @@ eq "$(t_of "$out" "$T/ten")" 5 "multiple -p: last one wins"
 out=$("$VMFILE" "$T/d" 2>&1); rc_is $? 0 "crawl of a directory exits 0"
 eq "$(grep -c 'Files: ' <<<"$out" | head -1)" 1 "crawl summary printed"
 
-# -f/-F/-h/-i/-I are dropped per the ratified spec: their flags remain
-# getopt-accepted until B5 removes them; -i/-I are inert in the interim.
-out=$("$VMFILE" -v -i '*.tmp' "$T/d" >/dev/null 2>&1); rc_is $? 0 "-i accepted (inert interim)"
-out=$("$VMFILE" -v -I '*.log' "$T/d" >/dev/null 2>&1); rc_is $? 0 "-I accepted (inert interim)"
-out=$("$VMFILE" -v -f "$T/d" >/dev/null 2>&1); rc_is $? 0 "-f accepted (inert interim)"
+# -f/-F/-h/-i/-I are REMOVED (B5: dropped per the ratified spec); getopt
+# rejects them as unknown options (usage + exit 1).
+out=$("$VMFILE" -v -i '*.tmp' "$T/d" >/dev/null 2>&1); rc_is $? 1 "-i rejected (flag dropped)"
+out=$("$VMFILE" -v -I '*.log' "$T/d" >/dev/null 2>&1); rc_is $? 1 "-I rejected (flag dropped)"
+out=$("$VMFILE" -v -f "$T/d" >/dev/null 2>&1); rc_is $? 1 "-f rejected (flag dropped)"
 
 out=$("$VMFILE" -v "$T/one" "$T/ten" 2>&1)
 has "$out" "Files: 2" "two files counted"
@@ -145,7 +145,7 @@ ln -s "$T/ten" "$T/link"
 out=$("$VMFILE" -v "$T/link" 2>&1)
 rc_is $? 0 "symlink (not followed) exits 0"
 
-out=$("$VMFILE" -v -f "$T/link" >/dev/null 2>&1); rc_is $? 0 "-f accepted (inert interim)"
+out=$("$VMFILE" -v -f "$T/link" >/dev/null 2>&1); rc_is $? 1 "-f rejected (flag dropped)"
 
 
 mk "$T/d/skip.tmp" 1
@@ -153,8 +153,9 @@ mk "$T/d/keep.log" 1
 # B2 interim: -i/-I are inert (filters removed from the library per the
 # ratified spec; both files are processed, exit 0). Behavior assertions
 # return in B6 if the CLI keeps any equivalent.
-out=$("$VMFILE" -v -i '*.tmp' -i '*.log' "$T/d" 2>&1); rc_is $? 0 "-i accepted (inert interim)"
-out=$("$VMFILE" -v -I '*.log' "$T/d" 2>&1); rc_is $? 0 "-I accepted (inert interim)"
+# -i/-I REMOVED (B5): rejected as unknown options.
+out=$("$VMFILE" -v -i '*.tmp' -i '*.log' "$T/d" >/dev/null 2>&1); rc_is $? 1 "-i rejected (flag dropped)"
+out=$("$VMFILE" -v -I '*.log' "$T/d" >/dev/null 2>&1); rc_is $? 1 "-I rejected (flag dropped)"
 
 
 evict "$T/big"
@@ -215,8 +216,8 @@ ln "$T/hl" "$T/hl2"
 out=$("$VMFILE" -v "$T/hl" "$T/hl2" 2>&1)
 has "$out" "Files: 1" "hardlink dedup: two hardlinks counted as one file"
 
-# -I: B2 interim — inert (see the -i block above)
-out=$("$VMFILE" -v -I '*.log' "$T/d" >/dev/null 2>&1); rc_is $? 0 "-I accepted (inert interim)"
+# -I REMOVED (B5): rejected as an unknown option.
+out=$("$VMFILE" -v -I '*.log' "$T/d" >/dev/null 2>&1); rc_is $? 1 "-I rejected (flag dropped)"
 
 # -m: oversized file counted but its pages skipped, with a warning
 out=$("$VMFILE" -m 1M "$T/big" 2>&1)
