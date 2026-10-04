@@ -28,7 +28,7 @@ TEST(cache_query_fresh_file_accounting) {
     unit::EngineEventsRecorder ev;
     auto r = cache::inspect(f.fd, cache::Params{}, &ev);
 
-    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Ok);
+    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Ok);
     EXPECT_EQ(r.pages_total, 4);               // whole file: 4 pages
     EXPECT_EQ(ev.file_starts, 1);
     EXPECT_EQ((int)ev.dones.size(), 1);
@@ -38,7 +38,7 @@ TEST(cache_query_fresh_file_accounting) {
     // non-verbose: no events at all
     unit::EngineEventsRecorder quiet_ev;
     auto rq = cache::inspect(f.fd, cache::Params{}, nullptr);
-    EXPECT_EQ((int)rq.code, (int)cache::Result::Code::Ok);
+    EXPECT_EQ((int)rq.code, (int)cache::FileResult::Code::Ok);
     EXPECT_EQ(quiet_ev.file_starts, 0);
 }
 
@@ -54,7 +54,7 @@ TEST(cache_query_resident_count_is_consistent) {
 
     auto r = cache::inspect(f.fd, cache::Params{}, nullptr);
 
-    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Ok);
+    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Ok);
     EXPECT_EQ(r.pages_total, 4);
     // Touched 2 pages; readahead may pull in more, never fewer.
     EXPECT_TRUE(r.pages_resident >= 2);
@@ -69,7 +69,7 @@ TEST(cache_touch_makes_all_pages_resident) {
     (void)cache::evict(f.fd, cache::Params{}, nullptr);
 
     auto r = cache::warm(f.fd, cache::Params{}, nullptr);
-    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Ok);
+    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Ok);
     EXPECT_EQ(r.pages_total, 3);
     // After -t the file must be fully resident (upstream contract). Verify
     // via a fresh query on the same fd:
@@ -83,7 +83,7 @@ TEST(cache_empty_file_skipped_silently) {
     unit::EngineEventsRecorder ev;
     auto r = cache::inspect(f.fd, cache::Params{}, &ev);
 
-    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Skipped);
+    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Skipped);
     EXPECT_TRUE(r.silent);              // upstream: silent for empty files
     EXPECT_EQ(ev.file_starts, 0);
     EXPECT_EQ(r.pages_total, 0);
@@ -95,7 +95,7 @@ TEST(cache_file_larger_than_max_skips_with_warning) {
     p.max_file_size = static_cast<size_t>(pagesize);   // -m 1 page
     auto r = cache::inspect(f.fd, p, nullptr);
 
-    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Skipped);
+    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Skipped);
     EXPECT_FALSE(r.silent);
     EXPECT_EQ((int)r.skip, (int)Failure::Kind::TooLarge);
     EXPECT_EQ(r.pages_total, 0);
@@ -107,7 +107,7 @@ TEST(cache_offset_beyond_eof_skips_with_warning) {
     p.range.offset = 10 * pagesize;
     auto r = cache::inspect(f.fd, p, nullptr);
 
-    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Skipped);
+    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Skipped);
     EXPECT_EQ((int)r.skip, (int)Failure::Kind::BeyondEof);
     EXPECT_EQ(r.offset, 10 * pagesize);
     EXPECT_EQ(r.pages_total, 0);
@@ -122,7 +122,7 @@ TEST(cache_partial_range_counts_only_selected_pages) {
     p.range.max_len = pagesize;
     auto r = cache::inspect(f.fd, p, &ev);
 
-    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Ok);
+    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Ok);
     EXPECT_EQ(r.pages_total, 1);         // only the selected page counts
     EXPECT_EQ(ev.dones[0].first, 1);
 }
@@ -131,14 +131,14 @@ TEST(cache_non_verbose_sinks_are_silent_but_stats_still_count) {
     unit::TempFile f(2);
     auto r = cache::inspect(f.fd, cache::Params{}, nullptr);
 
-    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Ok);
+    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Ok);
     EXPECT_EQ(r.pages_total, 2);
 }
 
 TEST(cache_mapped_region_ownership_and_move) {
     // A2: the verbs hand the mapping back; the caller owns it.
     unit::TempFile f(2);
-    cache::Result r = cache::inspect(f.fd, cache::Params{}, nullptr);
+    cache::FileResult r = cache::inspect(f.fd, cache::Params{}, nullptr);
     EXPECT_TRUE(static_cast<bool>(r.region));
 
     // Move: the source loses ownership; the destination munmaps on destruction.
@@ -184,7 +184,7 @@ TEST(cache_lock_failure_returns_fatal_fact) {
     }
     unit::TempFile f(npages);
     auto r = cache::lock(f.fd, cache::Params{}, nullptr);
-    EXPECT_EQ((int)r.code, (int)cache::Result::Code::Fatal);
-    EXPECT_EQ((int)r.fatal, (int)cache::Result::FatalWhat::MlockFailed);
+    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Fatal);
+    EXPECT_EQ((int)r.fatal, (int)cache::FileResult::FatalWhat::MlockFailed);
     EXPECT_TRUE(r.err != 0);          // errno carried back as data
 }

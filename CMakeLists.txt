@@ -11,6 +11,7 @@ add_library(vmtouch_core STATIC
     src/core/cache.cpp
     src/core/session.cpp
     src/core/crawl.cpp
+    src/core/file_handle.cpp
 )
 add_executable(vmtouch src/cli/main.cpp)
 target_link_libraries(vmtouch PRIVATE vmtouch_core)
@@ -46,6 +47,7 @@ add_executable(unit_tests
     tests/unit/main.cpp
     tests/unit/test_platform.cpp
     tests/unit/test_filters.cpp
+    tests/unit/test_file_handle.cpp
     tests/unit/test_cache.cpp
     tests/unit/test_session.cpp
     tests/unit/test_crawl.cpp

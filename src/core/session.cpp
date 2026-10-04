@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "file_handle.h"
 #include "platform.h"
 
 namespace {
@@ -31,25 +32,6 @@ cache::Verb verb_from_options(const Options& o) {
     if (o.lock)  return cache::Verb::Lock;
     if (o.touch) return cache::Verb::Warm;
     return cache::Verb::Inspect;
-}
-
-// Translates the rlimit outcome into the monolith's exact fatal messages.
-[[noreturn]] void throw_nofile_fatal(const platform::RaiseNofileResult& res) {
-    switch (res.outcome) {
-        case platform::RaiseNofileResult::Outcome::GetrlimitFailed:
-            throw FatalError(std::string("increment_nofile_rlimit: getrlimit (") +
-                             strerror(res.err) + ")");
-        case platform::RaiseNofileResult::Outcome::PermissionDenied:
-            if (getuid() == 0 || geteuid() == 0)
-                throw FatalError("system open file limit reached");
-            throw FatalError("open file limit reached and unable to increase limit. retry as root");
-        case platform::RaiseNofileResult::Outcome::SetrlimitFailed:
-            throw FatalError(std::string("increment_nofile_rlimit: setrlimit (") +
-                             strerror(res.err) + ")");
-        case platform::RaiseNofileResult::Outcome::Raised:
-            break;   // not an error; unreachable via this function
-    }
-    throw FatalError("increment_nofile_rlimit: unexpected state");
 }
 
 } // namespace
@@ -122,49 +104,21 @@ Session::Report Session::report() const {
 // ---- per-file pipeline -------------------------------------------------------
 
 Status Session::process_file(const std::string& path) {
-    int open_flags = O_RDONLY;
-#if defined(O_NOATIME)
-    open_flags |= O_NOATIME;
-#endif
-
-    // ---- open with EMFILE/ENFILE retry (retry loop lives HERE) ----------
-
-    int fd = -1;
-    for (;;) {
-        fd = open(path.c_str(), open_flags, 0);
-        if (fd != -1)
-            break;
-
-#if defined(O_NOATIME)
-        if (errno == EPERM && (open_flags & O_NOATIME)) {
-            open_flags &= ~O_NOATIME;   // owned by someone else: retry without O_NOATIME
-            continue;
-        }
-#endif
-
-        if (errno != ENFILE && errno != EMFILE)
-            break;
-
-        const auto res = platform::raise_nofile_rlimit();
-        if (res.outcome != platform::RaiseNofileResult::Outcome::Raised)
-            throw_nofile_fatal(res);
-        // limit raised: retry the open immediately
-    }
-
-    if (fd == -1) {
-        fail(Failure::Kind::Open, errno, path);
+    // B1: the open/retry logic lives in FileHandle now (verbatim move);
+    // the fd is owned by the handle and closed on every exit path below.
+    auto opened = vmt::FileHandle::open(path);
+    if (opened.is_error()) {
+        fail(opened.error().kind, opened.error().err, path);
         return Status::Skipped;
     }
 
     // fd is owned from here: closed on every exit path below.
     Status st;
     try {
-        st = run_verb_on_fd(fd, path, range_);
+        st = run_verb_on_fd(opened.value().fd(), path, range_);
     } catch (...) {
-        close(fd);
         throw;
     }
-    close(fd);
     return st;
 }
 
