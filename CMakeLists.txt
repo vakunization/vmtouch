@@ -67,4 +67,9 @@ add_test(NAME characterization
 )
 set_tests_properties(characterization PROPERTIES ENVIRONMENT "VMFILE=$<TARGET_FILE:vmtouch>")
 
+# The mlock-fatal characterization needs a non-sanitizer binary (ASan's mlock
+# interceptor succeeds where the real syscall fails). In the sanitizer build,
+# also look for a sibling plain build directory; in the plain build, VMFILE
+# itself is non-sanitized and the test uses it directly.
+
 add_test(NAME unit COMMAND unit_tests)
