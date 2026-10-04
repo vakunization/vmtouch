@@ -1,16 +1,14 @@
 // core/session.cpp — see session.h.
 //
-// A3: the public surface is process()/process_fd()/report(). The per-file
-// pipeline (open with O_NOATIME + EPERM fallback, EMFILE/ENFILE rlimit
-// retry loop lives HERE, as designed) is shared by process_file() and
-// process_fd() through run_verb_on_fd():
-//   * Ok        -> stats absorbed, region kept iff lock/lockall, else dropped;
-//   * Skipped   -> Failure record (unless silent), Status::Skipped;
-//   * Fatal     -> the session re-adds the path and throws FatalError with
-//                  the historical message text;
-//   * mincore_inaccurate / evict_failed -> Failure records (Ok still).
-// process_file() owns the fd it opens and closes it on every exit path.
-// process_fd() never closes (the fd stays the caller's, S3 contract).
+// B2 interim state (full rewrite lands in B4): the pipeline still runs
+// through process()/process_file()/run_verb_on_fd(), but the verb layer
+// now speaks the spec language — cache::* returns Result<VerbOutcome> and
+// throws FatalError; there are NO sinks anymore (the -v sink wiring is
+// removed; totals-only output arrives with the CLI rewrite in B5).
+//
+// Fatal handling (owner rulings): FatalError propagates for now; B4
+// converts it to Status::Fatal + a Failure{Kind::Fatal} record at the
+// public boundary.
 
 #include "session.h"
 
@@ -36,29 +34,8 @@ cache::Verb verb_from_options(const Options& o) {
 
 } // namespace
 
-// A2: bridge between the engine's path-less cache::EngineEvents and the
-// caller-facing cache::ProgressSink — binds the path of the file currently
-// being processed (the A1 FailureSink adapter used the same pattern).
-struct Session::PathBoundEvents final : public cache::EngineEvents {
-    Session* self;
-    const std::string& path;
-    cache::ProgressSink* sink;
-
-    PathBoundEvents(Session* s, const std::string& p, cache::ProgressSink* sk)
-        : self(s), path(p), sink(sk) {}
-
-    void on_file_start() override { sink->on_file_start(path); }
-    void on_evicting() override { sink->on_evicting(path); }
-    void on_chart(std::span<const unsigned char> pages, int64_t n) override {
-        sink->on_chart(pages, n);
-    }
-    void on_file_done(int64_t pages, int64_t resident) override {
-        sink->on_file_done(path, pages, resident);
-    }
-};
-
-Session::Session(Options opts, std::unique_ptr<cache::ProgressSink> sink)
-    : opts_(std::move(opts)), sink_(std::move(sink)),
+Session::Session(Options opts)
+    : opts_(std::move(opts)),
       crawler_(std::make_unique<Crawler>(*this)) {}
 
 Session::~Session() = default;
@@ -112,7 +89,6 @@ Status Session::process_file(const std::string& path) {
         return Status::Skipped;
     }
 
-    // fd is owned from here: closed on every exit path below.
     Status st;
     try {
         st = run_verb_on_fd(opened.value().fd(), path, range_);
@@ -123,84 +99,56 @@ Status Session::process_file(const std::string& path) {
 }
 
 Status Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRange& range) {
-    // Shared verb dispatch + classification (A3): used by process_file()
-    // (fd opened above) and process_fd() (caller-owned fd, S3).
+    // Shared verb dispatch + classification: used by process_file() (fd
+    // opened above) and process_fd() (caller-owned fd, S3).
+    //
+    // B2 classification of cache::* outcomes:
+    //   Error(Failure) -> the SAME record with the path attached, then
+    //                     Status::Skipped;
+    //   Ok(VerbOutcome)-> stats absorbed; region kept iff lock/lockall,
+    //                     else the session munmaps it here (MunmapFailed
+    //                     record with path context on failure — the
+    //                     upstream warning keeps its text);
+    //   FatalError     -> propagates (B4 converts at the public boundary).
+
     cache::Params params;
     params.range = range;
     params.max_file_size = opts_.max_file_size;
 
-    // Verbose gating, exactly the old FileInfo.verbose:
-    // events fire iff -v AND a sink is installed.
-    PathBoundEvents adapter(this, path, sink_.get());
-    cache::EngineEvents* ev = (opts_.verbose > 0 && sink_)
-                                  ? static_cast<cache::EngineEvents*>(&adapter)
-                                  : nullptr;
-
     const cache::Verb verb = verb_from_options(opts_);
 
-    Status st;
-    try {
-        cache::FileResult r;
+    vmt::Result<cache::VerbOutcome> r = [&] {
         switch (verb) {
-            case cache::Verb::Inspect: r = cache::inspect(fd, params, ev); break;
-            case cache::Verb::Warm:    r = cache::warm(fd, params, ev);    break;
-            case cache::Verb::Evict:   r = cache::evict(fd, params, ev);   break;
-            case cache::Verb::Lock:    r = cache::lock(fd, params, ev);    break;
+            case cache::Verb::Inspect: return cache::inspect(fd, params);
+            case cache::Verb::Warm:    return cache::warm(fd, params);
+            case cache::Verb::Evict:   return cache::evict(fd, params);
+            case cache::Verb::Lock:    return cache::lock(fd, params);
         }
+        throw FatalError("unreachable verb");
+    }();
 
-        if (r.code == cache::FileResult::Code::Fatal) {
-            // The verb lost the path (A2); the session re-adds it with the
-            // historical message text.
-            throw_fatal(r, path);
-        }
-
-        // Facts: the session decides what to collect.
-        stats_.total_pages += r.pages_total;
-        stats_.total_pages_in_core += r.pages_resident;
-
-        if (r.mincore_inaccurate)
-            fail(Failure::Kind::MincoreInaccurate, 0, path);
-        if (r.evict_failed)
-            fail(r.evict_kind, r.err, path);
-
-        // Region keep-policy, exactly upstream's bail-out guard
-        // (!o_lock && !o_lockall && mem -> munmap):
-        if (opts_.lock || opts_.lockall) {
-            kept_regions_.push_back(std::move(r.region));   // stays mapped
-        } else {
-            // The session munmaps here (not the region's destructor) so a
-            // munmap failure becomes a Failure record WITH path context —
-            // upstream: "unable to munmap file %s (%s)".
-            int munmap_err = 0;
-            if (!r.region.unmap(munmap_err))
-                fail(Failure::Kind::MunmapFailed, munmap_err, path);
-        }
-
-        if (r.code == cache::FileResult::Code::Ok) {
-            st = Status::Ok;
-        } else if (r.silent) {
-            st = Status::Skipped;     // silent skip: no record (empty file)
-        } else {
-            fail(r.skip, r.err, path, r.offset);
-            st = Status::Skipped;
-        }
-    } catch (...) {
-        throw;   // fd ownership stays with the caller of run_verb_on_fd
+    if (r.is_error()) {
+        // Attach the path (the verb is path-free) and record.
+        Failure f = r.error();
+        f.path = path;
+        fail(f.kind, f.err, f.path, f.offset);
+        return Status::Skipped;
     }
 
-    return st;
+    // Ok: absorb the stats; keep or drop the region.
+    stats_.total_pages += r.value().stats.total_pages;
+    stats_.total_pages_in_core += r.value().stats.total_pages_in_core;
+
+    if (opts_.lock || opts_.lockall) {
+        kept_regions_.push_back(std::move(r.value().region));   // stays mapped
+    } else if (r.value().region) {
+        // The verb hands inspect/warm/evict mappings back; the session
+        // munmaps (path context available for the failure record).
+        int munmap_err = 0;
+        if (!r.value().region.unmap(munmap_err))
+            fail(Failure::Kind::MunmapFailed, munmap_err, path);
+    }
+
+    return Status::Ok;
 }
 
-void Session::throw_fatal(const cache::FileResult& r, const std::string& path) {
-    switch (r.fatal) {
-        case cache::FileResult::FatalWhat::MlockFailed:
-            throw FatalError("mlock: " + path + " (" + strerror(r.err) + ")");
-        case cache::FileResult::FatalWhat::MincoreFailed:
-            throw FatalError("mincore " + path + " (" + strerror(r.err) + ")");
-        case cache::FileResult::FatalWhat::MisalignedMap:
-            throw FatalError("mmap(" + path + ") wasn't page aligned");
-        case cache::FileResult::FatalWhat::None:
-            break;
-    }
-    throw FatalError("unexpected fatal fact");
-}

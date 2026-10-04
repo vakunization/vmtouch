@@ -1,25 +1,23 @@
-// core/cache.cpp — see cache.h.
+// core/cache.cpp — see cache.h (spec2 §7).
 //
-// A2: process_file() dissolved into four verbs (inspect/warm/evict/lock)
-// sharing one prelude. Control flow, syscall sequence and print points are
-// transplanted verbatim from the Increment-1 engine (itself verbatim from
-// the monolith's vmtouch_file()). Deliberate deviations, each required by
-// the A2 seam:
-//   * no path: fatal messages that historically embedded the path now come
-//     back as FileResult::fatal facts; the session re-adds the path;
-//   * no verbose flag: progress events fire iff the EngineEvents pointer
-//     is non-null (the session's adapter binds the sink + path);
-//   * stats are returned as data (FileResult fields), not mutated in place;
-//   * the mapping is RETURNED (MappedRegion), never munmapped here — the
-//     session drops or keeps it exactly where upstream's bail-out did.
-// A1's coarse Failure kinds are kept as-is (known, user-parked question:
-// five rare warning texts drift from upstream — out of A2's scope).
+// Structure: one shared prelude (fstat -> block-device size -> empty ->
+// -m -> range -> mmap -> alignment), then the per-verb body. Syscalls are
+// wrapped by retry_op(): 3 attempts, 50 ms, only EINTR/EAGAIN/EBUSY;
+// retryable-after-N on mmap/munmap/mincore/mlock/fadvise/msync is FATAL
+// (spec2 §8.3) — non-retryable errors become Result::Error(Failure).
+//
+// The control flow (ranges, page math, the volatile touch-read loop that
+// IS the feature, the -l keep-mapping rule) is unchanged from the
+// pre-migration engine; what changed is the reporting surface: no paths,
+// no sinks, no progress events (spec §7.3: cache knows fd + Params only).
 
 #include "cache.h"
 
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -38,43 +36,68 @@
 namespace cache {
 namespace {
 
+constexpr int kRetryAttempts = 3;                  // spec2 §7.11
+constexpr int kRetrySleepMs = 50;
+
+bool is_retryable(int err) {
+    return err == EINTR || err == EAGAIN || err == EBUSY;   // spec2 §8.3
+}
+
 int64_t bytes2pages(int64_t bytes) {
     return (bytes + pagesize - 1) / pagesize;
 }
 
-constexpr double kChartUpdateInterval = 0.1;
+// Runs one syscall with the retry policy. `call` returns 0 on success,
+// -1 on failure with errno set. Outcomes:
+//   ok              -> true
+//   non-retryable   -> false, out_err = errno
+//   retryable after N attempts -> throws FatalError (message supplied)
+template <typename Call>
+bool retry_op(const char* fatal_what, Call&& call, int& out_err) {
+    int err = 0;
+    for (int attempt = 0; attempt < kRetryAttempts; ++attempt) {
+        if (call() == 0) {
+            out_err = 0;
+            return true;
+        }
+        err = errno;
+        if (!is_retryable(err))
+            break;
+        if (attempt + 1 < kRetryAttempts)
+            std::this_thread::sleep_for(std::chrono::milliseconds(kRetrySleepMs));
+    }
+    if (is_retryable(err))
+        throw FatalError(std::string(fatal_what) + " (" + strerror(err) + ")");
+    out_err = err;
+    return false;
+}
 
 // Internal working state shared by the prelude and the verbs.
 struct Mapping {
     MappedRegion region;
-    struct stat st = {};        // from the prelude's fstat: can_do_mincore reads it
+    struct stat st = {};        // prelude fstat: permission heuristic site
     int64_t len_of_file = 0;
     int64_t len_of_range = 0;
     int64_t pages_in_range = 0;
 };
 
-// Shared prelude: fstat -> block-device size -> empty -> -m -> range ->
-// mmap. Returns Ok (mapping established) or the skip/fatal fact.
-FileResult prelude(int fd, const Params& p, Mapping& m) {
+// Prelude (spec2 §7.6). Outcomes:
+//   * empty file -> skipped_ok = true, Ok (caller returns silent Ok);
+//   * Failure    -> Error record (path empty);
+//   * fatal      -> throws (platform).
+// Returns Ok (mapping established, m filled) or Error.
+vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok) {
+    skipped_ok = false;
+
     struct stat sb;
-    if (fstat(fd, &sb)) {
-        FileResult r;
-        r.code = FileResult::Code::Skipped;
-        r.skip = Failure::Kind::FstatFailed;   // upstream: "unable to fstat ... skipping"
-        r.err = errno;
-        return r;
-    }
+    if (fstat(fd, &sb))
+        return vmt::Result<void>::Error(Failure{Failure::Kind::FstatFailed, errno, "", 0});
     m.st = sb;
 
     if (S_ISBLK(sb.st_mode)) {
 #if defined(__linux__)
-        if (ioctl(fd, BLKGETSIZE64, &m.len_of_file)) {
-            FileResult r;
-            r.code = FileResult::Code::Skipped;
-            r.skip = Failure::Kind::IoctlSizeFailed;   // upstream: "unable to ioctl"
-            r.err = errno;
-            return r;
-        }
+        if (ioctl(fd, BLKGETSIZE64, &m.len_of_file))
+            return vmt::Result<void>::Error(Failure{Failure::Kind::IoctlSizeFailed, errno, "", 0});
 #else
         throw FatalError("discovering size of block devices not (yet?) supported on this platform");
 #endif
@@ -83,29 +106,19 @@ FileResult prelude(int fd, const Params& p, Mapping& m) {
     }
 
     if (m.len_of_file == 0) {
-        FileResult r;                                   // empty: silent skip, as upstream
-        r.code = FileResult::Code::Skipped;
-        r.silent = true;
-        return r;
+        skipped_ok = true;      // empty: silent Ok, no record (spec2 §7.13)
+        return vmt::Result<void>::Ok();
     }
 
-    if (static_cast<uint64_t>(m.len_of_file) > p.max_file_size) {
-        FileResult r;
-        r.code = FileResult::Code::Skipped;
-        r.skip = Failure::Kind::TooLarge;
-        return r;
-    }
+    if (static_cast<uint64_t>(m.len_of_file) > p.max_file_size)
+        return vmt::Result<void>::Error(Failure{Failure::Kind::TooLarge, 0, "", 0});
 
     // ---- range selection (verbatim) --------------------------------------
 
     if (p.range.max_len > 0 && (p.range.offset + p.range.max_len) < m.len_of_file) {
         m.len_of_range = p.range.max_len;
     } else if (p.range.offset >= m.len_of_file) {
-        FileResult r;
-        r.code = FileResult::Code::Skipped;
-        r.skip = Failure::Kind::BeyondEof;
-        r.offset = p.range.offset;
-        return r;
+        return vmt::Result<void>::Error(Failure{Failure::Kind::BeyondEof, 0, "", p.range.offset});
     } else {
         m.len_of_range = m.len_of_file - p.range.offset;
     }
@@ -113,49 +126,35 @@ FileResult prelude(int fd, const Params& p, Mapping& m) {
     // ---- map --------------------------------------------------------------
 
     void* mem = mmap(NULL, m.len_of_range, PROT_READ, MAP_SHARED, fd, p.range.offset);
-
     if (mem == MAP_FAILED) {
-        FileResult r;
-        r.code = FileResult::Code::Skipped;
-        r.skip = Failure::Kind::Map;
-        r.err = errno;
-        return r;
+        if (is_retryable(errno))
+            throw FatalError(std::string("mmap (") + strerror(errno) + ")");
+        return vmt::Result<void>::Error(Failure{Failure::Kind::Map, errno, "", 0});
     }
 
-    if (!platform::aligned_p(mem)) {
-        FileResult r;                                   // session re-adds the path
-        r.code = FileResult::Code::Fatal;
-        r.fatal = FileResult::FatalWhat::MisalignedMap;
-        return r;
+    if (!platform::aligned_p(mem)) {   // infrastructure: fatal (spec2 §8.3)
+        munmap(mem, m.len_of_range);
+        throw FatalError("mmap wasn't page aligned");
     }
 
     m.region = MappedRegion(mem, m.len_of_range);
     m.pages_in_range = bytes2pages(m.len_of_range);
-    return FileResult{};
+    return vmt::Result<void>::Ok();
 }
 
-// mincore pass shared by inspect/warm/lock: counts residency, fires the
-// verbose events at the old print points. `touch` performs the volatile
-// touch-read loop (the feature itself) with the throttled live chart.
-// Returns the Fatal fact for mincore failure (or throws for allocation
-// failure, as before).
-FileResult mincore_pass(const Mapping& m, bool touch, EngineEvents* ev,
-                    int64_t& pages_resident_out) {
-    FileResult r;
-    double last_chart_print_time = 0.0;
-
+// mincore pass: counts residency (no events — the sink layer is gone).
+// FROZEN split: mincore failure is FATAL in every case (non-retryable and
+// retryable-after-N alike) — mincore failure means residency data cannot
+// be trusted for this mapping at all.
+vmt::Result<int64_t> mincore_count(const Mapping& m) {
     auto* mincore_array = static_cast<unsigned char*>(malloc(m.pages_in_range));
     if (mincore_array == NULL)
         throw FatalError(std::string("Failed to allocate memory for mincore array (") + strerror(errno) + ")");
 
-    // 3rd arg to mincore is char* on BSD and unsigned char* on linux
-    if (mincore(m.region.mem(), m.len_of_range, mincore_array)) {
-        free(mincore_array);
-        r.code = FileResult::Code::Fatal;
-        r.fatal = FileResult::FatalWhat::MincoreFailed;   // session re-adds the path
-        r.err = errno;
-        return r;
-    }
+    int err = 0;
+    retry_op("mincore", [&] {
+        return mincore(m.region.mem(), m.len_of_range, mincore_array);
+    }, err);   // both branches throw (see retry_op + the note above)
 
     int64_t pages_resident = 0;
     for (int64_t i = 0; i < m.pages_in_range; i++) {
@@ -163,143 +162,135 @@ FileResult mincore_pass(const Mapping& m, bool touch, EngineEvents* ev,
             pages_resident++;
     }
 
-    if (ev) {
-        ev->on_file_start();
-#ifdef __linux__
-        if (!platform::can_do_mincore(m.st)) {
-            r.mincore_inaccurate = true;
-        }
-#endif
-        last_chart_print_time = platform::now_seconds();
-        ev->on_chart(std::span<const unsigned char>(mincore_array, m.pages_in_range), m.pages_in_range);
-    }
-
-    if (touch) {
-        // The volatile accumulator forces the per-page load — that load IS
-        // the -t/-l feature (the volatile read loop from upstream, kept by
-        // decision). Newer gcc flags the accumulator as "set but not used"
-        // under -Werror (only the volatile object, never its value, was
-        // observable). One explicit read-back of `j` after the loop
-        // satisfies the warning without altering the volatile semantics.
-        volatile uint64_t j = 0;
-        for (int64_t i = 0; i < m.pages_in_range; i++) {
-            j += (static_cast<char*>(m.region.mem()))[i * pagesize];
-            mincore_array[i] = 1;
-
-            if (ev) {
-                double temp_time = platform::now_seconds();
-                if (temp_time > (last_chart_print_time + kChartUpdateInterval)) {
-                    last_chart_print_time = temp_time;
-                    ev->on_chart(std::span<const unsigned char>(mincore_array, m.pages_in_range), m.pages_in_range);
-                }
-            }
-        }
-        uint64_t touched = j;   // explicit volatile read-back (also -Werror fix)
-        static_cast<void>(touched);
-        pages_resident = m.pages_in_range;
-    }
-
-    if (ev) {
-        // was: final print_page_residency_chart(...) + printf("\n") ending
-        // the verbose block. on_file_done replaces the trailing newline;
-        // the CLI's ChartSink emits "\n" inside on_file_done.
-        ev->on_chart(std::span<const unsigned char>(mincore_array, m.pages_in_range), m.pages_in_range);
-        ev->on_file_done(m.pages_in_range, pages_resident);
-    }
-
     free(mincore_array);
-    pages_resident_out = pages_resident;
-    return r;
+    return vmt::Result<int64_t>::Ok(pages_resident);
+}
+
+// The volatile touch-read loop — reading the first byte of every page IS
+// the feature (kept by decision; see the pre-migration history for why the
+// accumulator is explicitly read back).
+void touch_pages(const Mapping& m) {
+    volatile uint64_t j = 0;
+    for (int64_t i = 0; i < m.pages_in_range; i++)
+        j += (static_cast<char*>(m.region.mem()))[i * pagesize];
+    uint64_t touched = j;
+    static_cast<void>(touched);
+}
+
+// munmap inside the verb for inspect/warm/evict (spec2 §7.12): failure
+// after retry is FATAL — otherwise the mapping would leak unnoticed.
+void unmap_or_fatal(MappedRegion& region) {
+    int err = 0;
+    const bool ok = retry_op("munmap", [&] { return region.unmap(err) ? 0 : -1; }, err);
+    if (!ok)
+        throw FatalError(std::string("unable to munmap file (") + strerror(err) + ")");
 }
 
 } // namespace
 
 // ---------------------------------------------------------------------------
-// The four verbs.
+// The four verbs (spec2 §7.7 - §7.10).
 // ---------------------------------------------------------------------------
 
-FileResult inspect(int fd, const Params& p, EngineEvents* ev) {
+vmt::Result<VerbOutcome> inspect(int fd, const Params& p) {
     Mapping m;
-    if (FileResult r = prelude(fd, p, m); r.code != FileResult::Code::Ok)
-        return r;
+    bool empty = false;
+    if (auto pr = prelude(fd, p, m, empty); pr.is_error())
+        return vmt::Result<VerbOutcome>::Error(pr.error());
+    if (empty)
+        return vmt::Result<VerbOutcome>::Ok(VerbOutcome{});   // silent Ok, zero stats
 
-    int64_t pages_resident = 0;
-    FileResult r = mincore_pass(m, /*touch=*/false, ev, pages_resident);
-    if (r.code == FileResult::Code::Fatal)
-        return r;
+    auto resident = mincore_count(m);
+    if (resident.is_error())
+        return vmt::Result<VerbOutcome>::Error(resident.error());
 
-    r.pages_total = m.pages_in_range;
-    r.pages_resident = pages_resident;
-    r.region = std::move(m.region);
-    return r;
+    VerbOutcome out;
+    out.stats.total_pages = m.pages_in_range;
+    out.stats.total_pages_in_core = resident.value();
+    unmap_or_fatal(m.region);
+    return vmt::Result<VerbOutcome>::Ok(std::move(out));
 }
 
-FileResult warm(int fd, const Params& p, EngineEvents* ev) {
+vmt::Result<VerbOutcome> warm(int fd, const Params& p) {
     Mapping m;
-    if (FileResult r = prelude(fd, p, m); r.code != FileResult::Code::Ok)
-        return r;
+    bool empty = false;
+    if (auto pr = prelude(fd, p, m, empty); pr.is_error())
+        return vmt::Result<VerbOutcome>::Error(pr.error());
+    if (empty)
+        return vmt::Result<VerbOutcome>::Ok(VerbOutcome{});
 
-    int64_t pages_resident = 0;
-    FileResult r = mincore_pass(m, /*touch=*/true, ev, pages_resident);
-    if (r.code == FileResult::Code::Fatal)
-        return r;
+    if (auto resident = mincore_count(m); resident.is_error())
+        return vmt::Result<VerbOutcome>::Error(resident.error());
 
-    r.pages_total = m.pages_in_range;
-    r.pages_resident = pages_resident;
-    r.region = std::move(m.region);
-    return r;
+    touch_pages(m);
+
+    VerbOutcome out;
+    out.stats.total_pages = m.pages_in_range;
+    out.stats.total_pages_in_core = m.pages_in_range;   // all touched (spec2 §7.8)
+    unmap_or_fatal(m.region);
+    return vmt::Result<VerbOutcome>::Ok(std::move(out));
 }
 
-FileResult evict(int fd, const Params& p, EngineEvents* ev) {
+vmt::Result<VerbOutcome> evict(int fd, const Params& p) {
     Mapping m;
-    if (FileResult r = prelude(fd, p, m); r.code != FileResult::Code::Ok)
-        return r;
+    bool empty = false;
+    if (auto pr = prelude(fd, p, m, empty); pr.is_error())
+        return vmt::Result<VerbOutcome>::Error(pr.error());
+    if (empty)
+        return vmt::Result<VerbOutcome>::Ok(VerbOutcome{});
 
-    if (ev) ev->on_evicting();
-
-    FileResult r;
+    int err = 0;
 #if defined(__linux__) || defined(__hpux)
-    if (posix_fadvise(fd, p.range.offset, m.len_of_range, POSIX_FADV_DONTNEED)) {
-        r.evict_failed = true;
-        r.evict_kind = Failure::Kind::EvictAdviseFailed;   // upstream: "unable to posix_fadvise file"
-        r.err = errno;
-    }
+    const bool ok = retry_op("unable to posix_fadvise file", [&] {
+        return posix_fadvise(fd, p.range.offset, m.len_of_range, POSIX_FADV_DONTNEED);
+    }, err);
+    if (!ok)
+        return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::EvictAdviseFailed, err, "", 0});
 #elif defined(__FreeBSD__) || defined(__sun__) || defined(__APPLE__)
-    if (msync(m.region.mem(), m.len_of_range, MS_INVALIDATE)) {
-        r.evict_failed = true;
-        r.evict_kind = Failure::Kind::EvictInvalidateFailed;   // upstream: "unable to msync invalidate file"
-        r.err = errno;
-    }
+    const bool ok = retry_op("unable to msync invalidate file", [&] {
+        return msync(m.region.mem(), m.len_of_range, MS_INVALIDATE);
+    }, err);
+    if (!ok)
+        return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::EvictInvalidateFailed, err, "", 0});
 #else
     throw FatalError("cache eviction not (yet?) supported on this platform");
 #endif
 
-    r.pages_total = m.pages_in_range;
-    r.region = std::move(m.region);
-    return r;
+    VerbOutcome out;
+    out.stats.total_pages = m.pages_in_range;
+    unmap_or_fatal(m.region);
+    return vmt::Result<VerbOutcome>::Ok(std::move(out));
 }
 
-FileResult lock(int fd, const Params& p, EngineEvents* ev) {
+vmt::Result<VerbOutcome> lock(int fd, const Params& p) {
     Mapping m;
-    if (FileResult r = prelude(fd, p, m); r.code != FileResult::Code::Ok)
-        return r;
+    bool empty = false;
+    if (auto pr = prelude(fd, p, m, empty); pr.is_error())
+        return vmt::Result<VerbOutcome>::Error(pr.error());
+    if (empty)
+        return vmt::Result<VerbOutcome>::Ok(VerbOutcome{});
 
-    int64_t pages_resident = 0;
-    FileResult r = mincore_pass(m, /*touch=*/true, ev, pages_resident);   // -l implies touch
-    if (r.code == FileResult::Code::Fatal)
-        return r;
+    if (auto resident = mincore_count(m); resident.is_error())
+        return vmt::Result<VerbOutcome>::Error(resident.error());
 
-    if (mlock(m.region.mem(), m.len_of_range)) {
-        r.code = FileResult::Code::Fatal;
-        r.fatal = FileResult::FatalWhat::MlockFailed;     // session re-adds the path
-        r.err = errno;
-        return r;
+    touch_pages(m);   // -l implies touch
+
+    // FROZEN split: non-retryable mlock failure is FATAL (spec superseded
+    // by the owner's ruling), retryable-after-N also fatal.
+    int err = 0;
+    const bool ok = retry_op("mlock", [&] {
+        return mlock(m.region.mem(), m.len_of_range);
+    }, err);
+    if (!ok) {
+        throw FatalError(std::string("mlock (") + strerror(err) + ")");
     }
 
-    r.pages_total = m.pages_in_range;
-    r.pages_resident = pages_resident;
-    r.region = std::move(m.region);   // caller keeps the locked mapping alive
-    return r;
+    // NO munmap: the region is handed to the caller (spec2 §7.10).
+    VerbOutcome out;
+    out.stats.total_pages = m.pages_in_range;
+    out.stats.total_pages_in_core = m.pages_in_range;
+    out.region = std::move(m.region);
+    return vmt::Result<VerbOutcome>::Ok(std::move(out));
 }
 
 } // namespace cache

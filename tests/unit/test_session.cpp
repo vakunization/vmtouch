@@ -42,7 +42,7 @@ TEST(session_process_missing_path_warns_and_skips) {
     EXPECT_EQ(fx.session->failures()[0].path, "/tmp/vmtouch-no-such-file-evar");
     EXPECT_EQ(fx.session->failures()[0].err, ENOENT);
     EXPECT_EQ(fx.session->stats().total_pages, 0);
-    EXPECT_TRUE(fx.state->file_starts.empty());
+    EXPECT_EQ((int)st, (int)Status::Skipped);   // (B2: no sink state; pinned above)
 }
 
 TEST(session_process_file_end_to_end) {
@@ -53,9 +53,7 @@ TEST(session_process_file_end_to_end) {
 
     EXPECT_EQ((int)st, (int)Status::Ok);
     EXPECT_EQ(fx.session->stats().total_pages, 3);
-    EXPECT_EQ(fx.state->file_starts.size(), (size_t)1);
-    EXPECT_EQ(fx.state->done.size(), (size_t)1);
-    EXPECT_EQ(fx.state->done[0].first, f.path);   // sink saw the right path
+    EXPECT_EQ(fx.session->failures().size(), (size_t)0);   // B2: processing verified via stats/failures
     EXPECT_TRUE(fx.warn.empty());
 }
 
@@ -71,7 +69,7 @@ TEST(session_range_from_set_range_selects_pages) {
 
     EXPECT_EQ((int)st, (int)Status::Ok);
     EXPECT_EQ(fx.session->stats().total_pages, 1);
-    EXPECT_EQ(fx.state->done[0].second.first, 1);
+    EXPECT_EQ(fx.session->report().stats.total_pages, 1);   // report() reflects the range (B2)
 }
 
 TEST(session_quiet_records_even_when_quiet) {
@@ -108,5 +106,5 @@ TEST(session_second_file_accumulates_stats) {
     (void)fx.session->process(b.path);
 
     EXPECT_EQ(fx.session->stats().total_pages, 5);
-    EXPECT_EQ(fx.state->done.size(), (size_t)2);
+    EXPECT_EQ(fx.session->report().stats.total_pages, 5);   // B2: accumulation via report()
 }

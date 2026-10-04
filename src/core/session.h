@@ -25,9 +25,9 @@
 
 class Session {
 public:
-    // sink may be null (no verbose output).
-    // A4: filter policy travels inside Options — no separate filter arg.
-    Session(Options opts, std::unique_ptr<cache::ProgressSink> sink);
+    // sink parameter is a B2 interim artifact (the sink layer is dead —
+    // no events fire); B4 removes it entirely.
+    Session(Options opts);
     ~Session();
 
     Session(const Session&) = delete;
@@ -66,13 +66,11 @@ public:
     Stats& stats() { return stats_; }
     const Options& options() const { return opts_; }
     Options& options() { return opts_; }   // A4: tests/CLI mutate filter lists pre-walk
-    cache::ProgressSink* sink() const { return sink_.get(); }
     const FileInfoRange& range() const { return range_; }
     void set_range(const FileInfoRange& r) { range_ = r; }   // CLI applies -p here
 
 private:
     Options opts_;
-    std::unique_ptr<cache::ProgressSink> sink_;
     Stats stats_;
     FileInfoRange range_;
     std::vector<Failure> failures_;
@@ -88,15 +86,6 @@ private:
     // dispatch, result classification. Called by process() for regular
     // files and (before A3) directly by tests; internal from now on.
     Status process_file(const std::string& path);
-
-    // A2: bridge between the engine's path-less EngineEvents and the
-    // caller-facing ProgressSink — binds the path of the file currently
-    // being processed. Defined in session.cpp.
-    struct PathBoundEvents;
-
-    // A2: translate a verb's fatal fact back into the historical message
-    // (the verb lost the path; the session re-adds it).
-    [[noreturn]] void throw_fatal(const cache::FileResult& r, const std::string& path);
 
     // A3: shared verb dispatch + classification for an ALREADY-OPEN fd.
     // Does not close the fd — the open-path owner (process_file) or the

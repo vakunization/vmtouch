@@ -1,13 +1,10 @@
-// tests/unit/test_cache.cpp — behavior tests for the page-cache verb engine.
+// tests/unit/test_cache.cpp — behavior tests for the page-cache verb engine
+// (B2 surface: Result<VerbOutcome>, no sinks, no paths).
 //
 // S3-style: the caller opens the fd and hands it over; the verbs
-// (inspect/warm/evict/lock) never see a path. The behavior pinned here
-// comes from upstream vmtouch (already pinned end-to-end by tests/run.sh);
-// here it is pinned at the module boundary so the Phase-2 rewrite is
-// verified per module.
-//
-// scenario: S3 (mlock model loader) — caller-owned fd, distinct failure
-// reasons; S2 (QA checker) — query mode + residency numbers.
+// (inspect/warm/evict/lock) never see a path and never emit events.
+// The behavior pinned here is upstream vmtouch's (already pinned
+// end-to-end by tests/run.sh); here it is pinned at the module boundary.
 //
 // Note: touch/evict tests manipulate the real kernel page cache of their
 // temp files, which are private to the test process and deleted after.
@@ -19,27 +16,20 @@
 
 namespace {
 
+using cache::Params;
+using cache::VerbOutcome;
+
 int64_t pages_for(int64_t bytes) { return (bytes + pagesize - 1) / pagesize; }
 
 } // namespace
 
 TEST(cache_query_fresh_file_accounting) {
     unit::TempFile f(4);
-    unit::EngineEventsRecorder ev;
-    auto r = cache::inspect(f.fd, cache::Params{}, &ev);
+    auto r = cache::inspect(f.fd, Params{});
 
-    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Ok);
-    EXPECT_EQ(r.pages_total, 4);               // whole file: 4 pages
-    EXPECT_EQ(ev.file_starts, 1);
-    EXPECT_EQ((int)ev.dones.size(), 1);
-    EXPECT_EQ(ev.dones[0].first, 4);           // pages_in_file in on_file_done
-    EXPECT_EQ(ev.evictings, 0);
-    EXPECT_TRUE(static_cast<bool>(r.region));  // mapping returned to caller
-    // non-verbose: no events at all
-    unit::EngineEventsRecorder quiet_ev;
-    auto rq = cache::inspect(f.fd, cache::Params{}, nullptr);
-    EXPECT_EQ((int)rq.code, (int)cache::FileResult::Code::Ok);
-    EXPECT_EQ(quiet_ev.file_starts, 0);
+    EXPECT_TRUE(r.is_ok());
+    EXPECT_EQ(r.value().stats.total_pages, 4);           // whole file: 4 pages
+    EXPECT_FALSE(static_cast<bool>(r.value().region));   // inspect munmaps inside (spec2 §7.12)
 }
 
 TEST(cache_query_resident_count_is_consistent) {
@@ -52,13 +42,13 @@ TEST(cache_query_resident_count_is_consistent) {
         sum += static_cast<char*>(m)[off];
     munmap(m, f.size);
 
-    auto r = cache::inspect(f.fd, cache::Params{}, nullptr);
+    auto r = cache::inspect(f.fd, Params{});
 
-    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Ok);
-    EXPECT_EQ(r.pages_total, 4);
+    EXPECT_TRUE(r.is_ok());
+    EXPECT_EQ(r.value().stats.total_pages, 4);
     // Touched 2 pages; readahead may pull in more, never fewer.
-    EXPECT_TRUE(r.pages_resident >= 2);
-    EXPECT_TRUE(r.pages_resident <= 4);
+    EXPECT_TRUE(r.value().stats.total_pages_in_core >= 2);
+    EXPECT_TRUE(r.value().stats.total_pages_in_core <= 4);
 }
 
 TEST(cache_touch_makes_all_pages_resident) {
@@ -66,106 +56,116 @@ TEST(cache_touch_makes_all_pages_resident) {
     // Evict first so the touch has something to do (best effort; if the
     // filesystem ignores eviction the assertions still hold: a touched
     // file must end up fully resident).
-    (void)cache::evict(f.fd, cache::Params{}, nullptr);
+    (void)cache::evict(f.fd, Params{});
 
-    auto r = cache::warm(f.fd, cache::Params{}, nullptr);
-    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Ok);
-    EXPECT_EQ(r.pages_total, 3);
+    auto r = cache::warm(f.fd, Params{});
+    EXPECT_TRUE(r.is_ok());
+    EXPECT_EQ(r.value().stats.total_pages, 3);
     // After -t the file must be fully resident (upstream contract). Verify
     // via a fresh query on the same fd:
-    auto q = cache::inspect(f.fd, cache::Params{}, nullptr);
-    EXPECT_EQ(q.pages_total, 3);
-    EXPECT_EQ(q.pages_resident, 3);   // touched => all resident
+    auto q = cache::inspect(f.fd, Params{});
+    EXPECT_EQ(q.value().stats.total_pages, 3);
+    EXPECT_EQ(q.value().stats.total_pages_in_core, 3);   // touched => all resident
 }
 
-TEST(cache_empty_file_skipped_silently) {
+TEST(cache_empty_file_silent_ok_zero_stats) {
     unit::TempFile f(0);   // zero bytes
-    unit::EngineEventsRecorder ev;
-    auto r = cache::inspect(f.fd, cache::Params{}, &ev);
+    auto r = cache::inspect(f.fd, Params{});
 
-    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Skipped);
-    EXPECT_TRUE(r.silent);              // upstream: silent for empty files
-    EXPECT_EQ(ev.file_starts, 0);
-    EXPECT_EQ(r.pages_total, 0);
+    EXPECT_TRUE(r.is_ok());                    // Ok, NOT Skipped (spec2 §7.13)
+    EXPECT_EQ(r.value().stats.total_pages, 0);
+    EXPECT_EQ(r.value().stats.total_pages_in_core, 0);
+    EXPECT_FALSE(static_cast<bool>(r.value().region));
 }
 
-TEST(cache_file_larger_than_max_skips_with_warning) {
+TEST(cache_file_larger_than_max_is_error_with_kind) {
     unit::TempFile f(2);
-    cache::Params p;
+    Params p;
     p.max_file_size = static_cast<size_t>(pagesize);   // -m 1 page
-    auto r = cache::inspect(f.fd, p, nullptr);
+    auto r = cache::inspect(f.fd, p);
 
-    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Skipped);
-    EXPECT_FALSE(r.silent);
-    EXPECT_EQ((int)r.skip, (int)Failure::Kind::TooLarge);
-    EXPECT_EQ(r.pages_total, 0);
+    EXPECT_TRUE(r.is_error());
+    EXPECT_EQ((int)r.error().kind, (int)Failure::Kind::TooLarge);
+    EXPECT_TRUE(r.error().path.empty());       // verbs are path-free; session attaches
+    EXPECT_EQ(r.error().err, 0);
 }
 
-TEST(cache_offset_beyond_eof_skips_with_warning) {
+TEST(cache_offset_beyond_eof_is_error_with_offset) {
     unit::TempFile f(2);
-    cache::Params p;
+    Params p;
     p.range.offset = 10 * pagesize;
-    auto r = cache::inspect(f.fd, p, nullptr);
+    auto r = cache::inspect(f.fd, p);
 
-    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Skipped);
-    EXPECT_EQ((int)r.skip, (int)Failure::Kind::BeyondEof);
-    EXPECT_EQ(r.offset, 10 * pagesize);
-    EXPECT_EQ(r.pages_total, 0);
+    EXPECT_TRUE(r.is_error());
+    EXPECT_EQ((int)r.error().kind, (int)Failure::Kind::BeyondEof);
+    EXPECT_EQ(r.error().offset, 10 * pagesize);
 }
 
 TEST(cache_partial_range_counts_only_selected_pages) {
     unit::TempFile f(4);
-    unit::EngineEventsRecorder ev;
     // -p second page only: offset = 1 page, max_len = 1 page
-    cache::Params p;
+    Params p;
     p.range.offset = pagesize;
     p.range.max_len = pagesize;
-    auto r = cache::inspect(f.fd, p, &ev);
+    auto r = cache::inspect(f.fd, p);
 
-    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Ok);
-    EXPECT_EQ(r.pages_total, 1);         // only the selected page counts
-    EXPECT_EQ(ev.dones[0].first, 1);
-}
-
-TEST(cache_non_verbose_sinks_are_silent_but_stats_still_count) {
-    unit::TempFile f(2);
-    auto r = cache::inspect(f.fd, cache::Params{}, nullptr);
-
-    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Ok);
-    EXPECT_EQ(r.pages_total, 2);
+    EXPECT_TRUE(r.is_ok());
+    EXPECT_EQ(r.value().stats.total_pages, 1);   // only the selected page counts
 }
 
 TEST(cache_mapped_region_ownership_and_move) {
-    // A2: the verbs hand the mapping back; the caller owns it.
+    // B2: inspect munmaps inside itself (spec2 §7.12) — its region is
+    // empty. The ownership/move/unmap semantics are pinned on lock() (the
+    // one verb that hands a LIVE mapping to the caller).
     unit::TempFile f(2);
-    cache::FileResult r = cache::inspect(f.fd, cache::Params{}, nullptr);
-    EXPECT_TRUE(static_cast<bool>(r.region));
+    auto r = cache::lock(f.fd, Params{});
+    EXPECT_TRUE(r.is_ok());
+    EXPECT_TRUE(static_cast<bool>(r.value().region));
 
     // Move: the source loses ownership; the destination munmaps on destruction.
-    void* mem = r.region.mem();
-    int64_t len = r.region.len();
-    cache::MappedRegion moved = std::move(r.region);
-    EXPECT_FALSE(static_cast<bool>(r.region));
+    void* mem = r.value().region.mem();
+    int64_t len = r.value().region.len();
+    cache::MappedRegion moved = std::move(r.value().region);
+    EXPECT_FALSE(static_cast<bool>(r.value().region));
     EXPECT_TRUE(static_cast<bool>(moved));
     EXPECT_TRUE(moved.mem() == mem);     // pointer identity survives the move
     EXPECT_EQ(moved.len(), len);
 
-    // Reading through the moved mapping still works (page 0 in core after
-    // the inspect pass — touching to be sure it is faulted in).
+    // Reading through the moved mapping still works (faulted in by lock's
+    // touch pass).
     volatile char c = static_cast<char*>(moved.mem())[0];
     (void)c;
+
+    // unmap(int&): idempotent, second call is a no-op returning true.
+    int err = 0;
+    EXPECT_TRUE(moved.unmap(err));
+    EXPECT_FALSE(static_cast<bool>(moved));
+    EXPECT_TRUE(moved.unmap(err));       // idempotent
+    EXPECT_TRUE(moved.mem() == nullptr); // cleared — do NOT dereference after unmap
 }
 
-// scenario: S3 (mlock model loader) — "tell me WHY mlock failed". A2: the
-// lock verb returns the mlock failure as a Fatal FACT (MlockFailed + errno);
-// the session re-adds the path and throws (pinned at session level in
-// test_session.cpp). Pinned here: the fact comes back, not an exception.
+TEST(cache_evict_reports_advisory_failure_kind) {
+    // Eviction of a fresh private temp file normally succeeds; this test
+    // pins the Ok shape (stats populated, region empty). The failure kind
+    // (EvictAdviseFailed) cannot be triggered deterministically without a
+    // bad fd — pinned at the classification level in B6 via session tests.
+    unit::TempFile f(2);
+    auto r = cache::evict(f.fd, Params{});
+    EXPECT_TRUE(r.is_ok());
+    EXPECT_EQ(r.value().stats.total_pages, 2);
+    EXPECT_FALSE(static_cast<bool>(r.value().region));
+}
+
+// scenario: S3 (mlock model loader) — "tell me WHY mlock failed". Frozen
+// split (owner ruling): non-retryable AND retryable-after-N mlock failures
+// are FATAL — the verb throws FatalError carrying the errno text (path is
+// added by the caller).
 //
 // NOTE: skipped under ASan/UBSan — ASan intercepts mlock(2) and its
 // interceptor succeeds where the real syscall would fail with ENOMEM, so
 // the failure path cannot be exercised in a sanitizer build (verified by
 // raw-syscall comparison). The no-sanitizer CI run covers this test.
-TEST(cache_lock_failure_returns_fatal_fact) {
+TEST(cache_lock_failure_throws_fatal_error) {
 #ifdef __SANITIZE_ADDRESS__
     std::printf("  skip lock-failure test (ASan intercepts mlock)\n");
     return;
@@ -183,8 +183,25 @@ TEST(cache_lock_failure_returns_fatal_fact) {
         return;
     }
     unit::TempFile f(npages);
-    auto r = cache::lock(f.fd, cache::Params{}, nullptr);
-    EXPECT_EQ((int)r.code, (int)cache::FileResult::Code::Fatal);
-    EXPECT_EQ((int)r.fatal, (int)cache::FileResult::FatalWhat::MlockFailed);
-    EXPECT_TRUE(r.err != 0);          // errno carried back as data
+    bool threw = false;
+    try {
+        (void)cache::lock(f.fd, Params{});
+    } catch (const FatalError& e) {
+        threw = true;
+        EXPECT_TRUE(std::string(e.what()).find("mlock") != std::string::npos);
+    }
+    EXPECT_TRUE(threw);
+}
+
+TEST(cache_lock_success_returns_live_region) {
+    // Lock hands the mapping to the caller (spec2 §7.10): region populated,
+    // still valid, caller munmaps (we do, explicitly — the file is private).
+    unit::TempFile f(2);
+    auto r = cache::lock(f.fd, Params{});
+    EXPECT_TRUE(r.is_ok());
+    EXPECT_TRUE(static_cast<bool>(r.value().region));
+    EXPECT_EQ(r.value().stats.total_pages, 2);
+
+    int err = 0;
+    EXPECT_TRUE(r.value().region.unmap(err));
 }

@@ -47,24 +47,10 @@ struct TempFile {
 };
 
 // ---------------------------------------------------------------------------
-// RecordingSink: a ProgressSink that records calls (cache tests pass it by
-// reference, so the test can inspect it after the call).
+// RecordingSink: REMOVED in B2 (the sink layer is gone — verbs return
+// Result<VerbOutcome>, no events). Cache-level tests read the Result data
+// directly; session-level tests read failures()/stats().
 // ---------------------------------------------------------------------------
-struct RecordingSink final : public cache::ProgressSink {
-    std::vector<std::string> file_starts;
-    std::vector<std::string> evictings;
-    std::vector<int64_t> chart_page_counts;
-    std::vector<std::pair<std::string, std::pair<int64_t, int64_t>>> done; // path, {pages, resident}
-
-    void on_file_start(std::string_view p) override { file_starts.emplace_back(p); }
-    void on_evicting(std::string_view p) override { evictings.emplace_back(p); }
-    void on_chart(std::span<const unsigned char>, int64_t pages_in_file) override {
-        chart_page_counts.push_back(pages_in_file);
-    }
-    void on_file_done(std::string_view p, int64_t pages, int64_t resident) override {
-        done.emplace_back(std::string(p), std::make_pair(pages, resident));
-    }
-};
 
 // ---------------------------------------------------------------------------
 // WarningCapture (A1): captures structured Failure records instead of text.
@@ -110,79 +96,39 @@ struct WarningCapture {
 };
 
 // ---------------------------------------------------------------------------
-// EngineEventsRecorder (A2): path-less engine events, recorded (no
-// WarningCapture needed — cache-level tests read the Result data).
+// EngineEventsRecorder: REMOVED in B2 (events removed with the sinks).
 // ---------------------------------------------------------------------------
-struct EngineEventsRecorder final : public cache::EngineEvents {
-    int file_starts = 0;
-    int evictings = 0;
-    std::vector<int64_t> chart_page_counts;
-    std::vector<std::pair<int64_t, int64_t>> dones;   // {pages, resident}
 
-    void on_file_start() override { file_starts++; }
-    void on_evicting() override { evictings++; }
-    void on_chart(std::span<const unsigned char>, int64_t pages_in_file) override {
-        chart_page_counts.push_back(pages_in_file);
-    }
-    void on_file_done(int64_t pages, int64_t resident) override {
-        dones.emplace_back(pages, resident);
-    }
-};
+// SharedSinkState: kept as an (unpopulated) type so existing call sites
+// compile through B2; B4/B6 remove it along with the old assertions.
+struct SharedSinkState {};
 
 // ---------------------------------------------------------------------------
-// Session wiring: Session owns its sink (unique_ptr), so the observable
-// state lives in a shared box the test holds. make_session() is the one
-// place that knows the current Session constructor shape.
+// Session wiring (B2): no sink parameter anymore — Session(Options).
+// make_session() is the one place that knows the current constructor
+// shape; the warn reference stays in the signature for test ergonomics
+// (failures are read via session->failures(), which is the same data).
 // ---------------------------------------------------------------------------
-struct SharedSinkState {
-    std::vector<std::string> file_starts;
-    std::vector<std::string> evictings;
-    std::vector<int64_t> chart_page_counts;
-    std::vector<std::pair<std::string, std::pair<int64_t, int64_t>>> done;
-};
-
-struct SharedSink final : public cache::ProgressSink {
-    explicit SharedSink(std::shared_ptr<SharedSinkState> st) : state(std::move(st)) {}
-    std::shared_ptr<SharedSinkState> state;
-    void on_file_start(std::string_view p) override { state->file_starts.emplace_back(p); }
-    void on_evicting(std::string_view p) override { state->evictings.emplace_back(p); }
-    void on_chart(std::span<const unsigned char>, int64_t pages_in_file) override {
-        state->chart_page_counts.push_back(pages_in_file);
-    }
-    void on_file_done(std::string_view p, int64_t pages, int64_t resident) override {
-        state->done.emplace_back(std::string(p), std::make_pair(pages, resident));
-    }
-};
-
 inline std::unique_ptr<Session>
-make_session(std::shared_ptr<SharedSinkState> state, WarningCapture& warn,
+make_session(std::shared_ptr<SharedSinkState>, WarningCapture& warn,
              const FileInfoRange& range = {}, bool quiet = false) {
     Options o;
     o.quiet = quiet;
-    o.verbose = 1;   // scenario: S1/S2 want per-file numbers; today those ride
-                     // on the verbose flag (CLI coupling — Phase 3 agenda)
-    auto s = std::make_unique<Session>(
-        o,
-        std::make_unique<SharedSink>(std::move(state)));
+    auto s = std::make_unique<Session>(o);
     s->set_range(range);
     return s;
 }
 
-// make_session with caller-supplied Options (the CLI's real flow: getopt
-// fills Options, then the Session is constructed from the final values).
 inline std::unique_ptr<Session>
-make_session(std::shared_ptr<SharedSinkState> state, WarningCapture& warn,
+make_session(std::shared_ptr<SharedSinkState>, WarningCapture& warn,
              const Options& opts, const FileInfoRange& range = {}) {
-    Options o = opts;
-    if (o.verbose == 0) o.verbose = 1;   // same per-file-numbers default as above
-    auto s = std::make_unique<Session>(
-        o,
-        std::make_unique<SharedSink>(std::move(state)));
+    auto s = std::make_unique<Session>(opts);
     s->set_range(range);
     return s;
 }
 
-// Convenience: a fresh shared sink state as shared_ptr.
+// Convenience: a fresh shared sink state as shared_ptr (kept for call-site
+// compatibility; the state is no longer populated — read session state).
 inline std::shared_ptr<SharedSinkState> make_shared_state() {
     return std::make_shared<SharedSinkState>();
 }

@@ -120,7 +120,7 @@ TEST(crawl_single_file_visits_session_once) {
     EXPECT_EQ(fx.crawler->total_files(), 1);
     EXPECT_EQ(fx.crawler->total_dirs(), 0);
     EXPECT_EQ(fx.session->stats().total_pages, 1);
-    EXPECT_EQ(fx.state->file_starts.size(), (size_t)1);
+    EXPECT_EQ(fx.session->failures().size(), (size_t)0);   // clean visit (B2: no sink state)
 }
 
 TEST(crawl_directory_nesting_counts_and_visits) {
@@ -137,7 +137,7 @@ TEST(crawl_directory_nesting_counts_and_visits) {
     EXPECT_EQ(fx.crawler->total_files(), 3);
     EXPECT_EQ(fx.crawler->total_dirs(), 3);      // tree root itself + a + a/b (root counts when walked as dir — verified against CLI)
     EXPECT_EQ(fx.session->stats().total_pages, 4);
-    EXPECT_EQ(fx.state->done.size(), (size_t)3);
+    EXPECT_EQ(fx.session->failures().size(), (size_t)0);   // all three processed (B2)
 }
 
 TEST(crawl_ignore_pattern_removes_files_and_dirs) {
@@ -156,9 +156,9 @@ TEST(crawl_ignore_pattern_removes_files_and_dirs) {
 
     EXPECT_EQ(fx.crawler->total_files(), 2);     // keep/f and keep.log
     EXPECT_EQ(fx.session->stats().total_pages, 2);
-    // Nothing ignored reached the session:
-    for (const auto& d : fx.state->done)
-        EXPECT_TRUE(d.first.find("skip") == std::string::npos);
+    // Nothing ignored reached the session: failures stay empty (B2: the
+    // ignore prune happens in the crawler, no records at all).
+    EXPECT_EQ(fx.session->failures().size(), (size_t)0);
 }
 
 TEST(crawl_filename_filter_keeps_only_matching) {
@@ -173,7 +173,7 @@ TEST(crawl_filename_filter_keeps_only_matching) {
 
     EXPECT_EQ(fx.crawler->total_files(), 1);
     EXPECT_EQ(fx.session->stats().total_pages, 1);
-    EXPECT_EQ(fx.state->done[0].first, tree.child("d/keep.log"));
+    EXPECT_EQ(fx.session->failures().size(), (size_t)0);   // the kept file processed (B2)
 }
 
 TEST(crawl_hardlink_dedup_default_once) {
@@ -275,7 +275,8 @@ TEST(crawl_trailing_slash_normalized) {
     fx.crawler->walk(tree.path + "/");   // trailing slash, as users type it
 
     EXPECT_EQ(fx.crawler->total_files(), 1);
-    // no double slash in echoed paths:
-    for (const auto& d : fx.state->done)
-        EXPECT_TRUE(d.first.find("//") == std::string::npos);
+    // B2: the path-echo assertion moves to run.sh (CLI renders paths, the
+    // library no longer emits them); pin the processing instead:
+    EXPECT_EQ(fx.session->stats().total_pages, 1);
+    EXPECT_EQ(fx.session->failures().size(), (size_t)0);
 }

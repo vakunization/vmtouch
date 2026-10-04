@@ -101,8 +101,8 @@ struct Failure {
         SeparateFs = 8,       // -F: not recursing into other filesystem
         CrawlLoop = 9,        // symbolic link loop detected
         PathTooLong = 10,     // path exceeds PATH_MAX
-        MincoreInaccurate = 11, // kernel >= 5.2 write-permission heuristic
-        EvictFailed = 12,     // fadvise/msync eviction failure
+        MincoreInaccurate = 11, // RESERVED (kernel >= 5.2 heuristic) — not produced since the spec migration
+        EvictFailed = 12,     // legacy umbrella — not produced (18/19 supersede)
         Closedir = 13,        // unable to closedir
         // --- A1-drift fix (commit following A2): upstream renders these
         // five failure SITES with their own texts; the coarse kinds above
@@ -114,6 +114,8 @@ struct Failure {
         MunmapFailed = 17,    // unable to munmap file PATH (ERR)
         EvictAdviseFailed = 18,     // unable to posix_fadvise file PATH (ERR)
         EvictInvalidateFailed = 19, // unable to msync invalidate file PATH (ERR)
+        Fatal = 20,           // TERMINAL: traversal stopped (mlock/mincore fatal,
+                              // depth, allocation, platform). err/path describe the site.
     };
     Kind        kind;
     int32_t     err = 0;    // errno, 0 if not applicable

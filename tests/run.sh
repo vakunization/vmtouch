@@ -41,8 +41,19 @@ pages() { # $1 out  $2 path  $3 r|t
     END { print v }
   '
 }
-r_of() { pages "$1" "$2" r; }
-t_of() { pages "$1" "$2" t; }
+
+# B2 interim: the per-file -v chart is gone (ratified spec: totals-only -v,
+# sink layer removed from the library). These helpers read the SUMMARY
+# numbers instead — total pages of ONE file = TotalPages (query mode) or
+# the touched/evicted page count. The full run.sh rebuild lands in B6;
+# these shims keep the suite meaningful through B2-B5.
+r_of() { # resident pages of path $2 in output $1 (summary line)
+  printf '%s\n' "$1" | grep -F 'Resident Pages:' | head -1 | sed -E 's/.*: ([0-9]+)\/[0-9]+.*/\1/'
+}
+t_of() { # touched/evicted/total pages of path $2 in output $1 (summary line)
+  printf '%s\n' "$1" | grep -E 'Touched Pages:|Evicted Pages:|Resident Pages:' | head -1 \
+    | sed -E 's/.*: ([0-9]+).*/\1/'
+}
 
 # 0 = evicted, 1 = still hot, 2 = parser failed
 evict() {
@@ -111,9 +122,20 @@ out=$("$VMFILE" -v -p "0-$p1" -p "0-$p5" "$T/ten" 2>&1)
 eq "$(t_of "$out" "$T/ten")" 5 "multiple -p: last one wins"
 
 
-out=$("$VMFILE" -v "$T/d" 2>&1)
-has "$out" "$T/d/a"     "crawl reaches $T/d/a"
-has "$out" "$T/d/sub/b" "crawl reaches nested file"
+# B2 interim: per-file -v echoes (crawl reachability, -f/-i/-I/\-/b path
+# listings, trailing-slash path rendering) are GONE — the ratified spec
+# makes -v totals-only. These assertions return with equivalent
+# summary/exit-code forms in the B6 run.sh rebuild. The exit-code and
+# warning halves of those blocks still run below where meaningful.
+
+out=$("$VMFILE" "$T/d" 2>&1); rc_is $? 0 "crawl of a directory exits 0"
+eq "$(grep -c 'Files: ' <<<"$out" | head -1)" 1 "crawl summary printed"
+
+# -f/-F/-h/-i/-I are dropped per the ratified spec: their flags remain
+# getopt-accepted until B5 removes them; -i/-I are inert in the interim.
+out=$("$VMFILE" -v -i '*.tmp' "$T/d" >/dev/null 2>&1); rc_is $? 0 "-i accepted (inert interim)"
+out=$("$VMFILE" -v -I '*.log' "$T/d" >/dev/null 2>&1); rc_is $? 0 "-I accepted (inert interim)"
+out=$("$VMFILE" -v -f "$T/d" >/dev/null 2>&1); rc_is $? 0 "-f accepted (inert interim)"
 
 out=$("$VMFILE" -v "$T/one" "$T/ten" 2>&1)
 has "$out" "Files: 2" "two files counted"
@@ -121,24 +143,18 @@ has "$out" "Files: 2" "two files counted"
 
 ln -s "$T/ten" "$T/link"
 out=$("$VMFILE" -v "$T/link" 2>&1)
-has "$out" "$T/link" "symlink path is echoed"
+rc_is $? 0 "symlink (not followed) exits 0"
 
-out=$("$VMFILE" -v -f "$T/link" 2>&1)
-has "$out" "$T/link" "-f still echoes the link path"
+out=$("$VMFILE" -v -f "$T/link" >/dev/null 2>&1); rc_is $? 0 "-f accepted (inert interim)"
 
 
 mk "$T/d/skip.tmp" 1
 mk "$T/d/keep.log" 1
-out=$("$VMFILE" -v -i '*.tmp' -i '*.log' "$T/d" 2>&1)
-if grep -qF -- "$T/d/skip.tmp" <<<"$out"; then
-  fail "-i" "*.tmp not ignored"
-elif grep -qF -- "$T/d/keep.log" <<<"$out"; then
-  fail "-i" "*.log not ignored"
-elif ! grep -qF -- "$T/d/a" <<<"$out"; then
-  fail "-i" "non-matching file $T/d/a missing"
-else
-  ok "-i: both patterns active, others kept"
-fi
+# B2 interim: -i/-I are inert (filters removed from the library per the
+# ratified spec; both files are processed, exit 0). Behavior assertions
+# return in B6 if the CLI keeps any equivalent.
+out=$("$VMFILE" -v -i '*.tmp' -i '*.log' "$T/d" 2>&1); rc_is $? 0 "-i accepted (inert interim)"
+out=$("$VMFILE" -v -I '*.log' "$T/d" 2>&1); rc_is $? 0 "-I accepted (inert interim)"
 
 
 evict "$T/big"
@@ -182,8 +198,7 @@ out=$("$VMFILE" -v "$T/with space" 2>&1)
 eq "$(t_of "$out" "$T/with space")" 3 "path with space"
 
 cp "$T/one" "$T/-dash"
-out=$(cd "$T" && "$VMFILE" -v -- -dash 2>&1)
-has "$out" "-dash" "leading-dash filename via --"
+out=$(cd "$T" && "$VMFILE" -v -- -dash >/dev/null 2>&1); rc_is $? 0 "leading-dash filename via -- accepted"
 
 dd if=/dev/zero of="$T/short" bs=$((PAGESIZE-1)) count=1 2>/dev/null
 dd if=/dev/zero of="$T/long"  bs="$PAGESIZE"     count=1 2>/dev/null
@@ -201,15 +216,8 @@ has "$out" "Files: 1" "hardlink dedup: two hardlinks counted as one file"
 out=$("$VMFILE" -v -h "$T/hl" "$T/hl2" 2>&1)
 has "$out" "Files: 2" "-h counts hardlinked copies separately"
 
-# -I: only files matching the filter are processed (directories still traversed)
-out=$("$VMFILE" -v -I '*.log' "$T/d" 2>&1)
-if grep -qF -- "$T/d/a" <<<"$out"; then
-  fail "-I" "non-matching file $T/d/a was processed"
-elif ! grep -qF -- "$T/d/keep.log" <<<"$out"; then
-  fail "-I" "matching file $T/d/keep.log missing"
-else
-  ok "-I: only matching files processed"
-fi
+# -I: B2 interim — inert (see the -i block above)
+out=$("$VMFILE" -v -I '*.log' "$T/d" >/dev/null 2>&1); rc_is $? 0 "-I accepted (inert interim)"
 
 # -m: oversized file counted but its pages skipped, with a warning
 out=$("$VMFILE" -m 1M "$T/big" 2>&1)
@@ -218,13 +226,15 @@ out=$("$VMFILE" -m 1M -o kv "$T/big" 2>&1)
 has "$out" "Files=1 "      "-m: file still counted"
 has "$out" "TotalPages=0 " "-m: pages not counted"
 
-# -b: batch list file; -0: NUL-delimited batch input
+# -b: batch list file; -0: NUL-delimited batch input. B2 interim: the
+# summary aggregates the whole call, so the page count includes ALL files
+# in the batch — assert exit code + Files count instead.
 printf '%s\n' "$T/ten" > "$T/list"
-out=$("$VMFILE" -v -b "$T/list" 2>&1)
-eq "$(t_of "$out" "$T/ten")" 10 "-b reads paths from list file"
+out=$("$VMFILE" -v -b "$T/list" 2>&1); rc_is $? 0 "-b reads paths from list file"
+has "$out" "Files: 1" "-b: one file counted"
 printf '%s\0' "$T/one" "$T/ten" > "$T/list0"
-out=$("$VMFILE" -v -0 -b "$T/list0" 2>&1)
-eq "$(t_of "$out" "$T/ten")" 10 "-b -0 handles NUL-delimited paths"
+out=$("$VMFILE" -v -0 -b "$T/list0" 2>&1); rc_is $? 0 "-b -0 handles NUL-delimited paths"
+has "$out" "Files: 2" "-b -0: two files counted"
 
 # invalid option combinations exit 1 with a FATAL message
 for combo in "-t -e" "-e -l" "-l -L" "-q -v" "-w" "-P $T/pf"; do
@@ -273,14 +283,9 @@ fi
 out=$("$VMFILE" -v -p "100M-200M" "$T/ten" 2>&1); rc_is $? 0 "-p beyond EOF exits 0"
 has "$out" "smaller than offset" "-p beyond EOF warns"
 
-# trailing slash: dir still crawled, no double slash in echoed paths
+# trailing slash: dir still crawled (B2: no path echo — exit code only)
 out=$("$VMFILE" -v "$T/d/" 2>&1); rc_is $? 0 "trailing slash exits 0"
-has "$out" "$T/d/a" "trailing slash: directory still crawled"
-if grep -qF -- "$T/d//" <<<"$out"; then
-  fail "trailing slash" "double slash in echoed path"
-else
-  ok "trailing slash: no double slash"
-fi
+has "$out" "Files: 4" "trailing slash: directory still crawled (files counted)"
 
 # symlink loop with -f: detected, terminates with exit 0.
 # Note: without -h the hardlink-dedup check (dirs have st_nlink>=2) returns
@@ -291,10 +296,7 @@ out=$("$VMFILE" -v -f -h "$T/d" 2>&1); rc_is $? 0 "symlink loop exits 0"
 has "$out" "symbolic link loop detected" "symlink loop detected under -f -h"
 ln -s "$T/d" "$T/d/loop2"
 out=$("$VMFILE" -v -f "$T/d/loop2" 2>&1); rc_is $? 0 "symlink-to-dir with -f exits 0"
-has "$out" "$T/d/loop2/a" "-f on symlink-to-dir: follows and lists contents"
-# revisit of d is silent here (dedup, no -h); warning path is pinned by the
-# -f -h case above. Only termination is asserted:
-has "$out" "$T/d/loop2/sub/b" "-f nested traversal terminates"
+has "$out" "Files: 4" "-f on symlink-to-dir: contents processed once (dedup)"
 out=$("$VMFILE" -v "$T/d/loop2" 2>&1)
 has "$out" "not following symbolic link" "symlink without -f: not followed"
 grep -qF -- "$T/d/loop" <<<"$("$VMFILE" -v -f "$T/d" 2>&1)" \

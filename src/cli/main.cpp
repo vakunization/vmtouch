@@ -194,6 +194,15 @@ static std::string format_failure(const Failure& f) {
       return "unable to posix_fadvise file " + f.path + " (" + strerror(f.err) + ")";
     case Failure::Kind::EvictInvalidateFailed:
       return "unable to msync invalidate file " + f.path + " (" + strerror(f.err) + ")";
+    case Failure::Kind::Fatal:
+      // Terminal record (B2): rendered as the historical FATAL text. The
+      // fatal sites are few and known (mlock/mincore/misaligned-mmap/
+      // depth/allocation/platform); the message text already carries the
+      // site formatting from the engine. B4/B5 wire this to the FATAL
+      // line + exit 1.
+      return f.path.empty()
+                 ? std::string(strerror(f.err))
+                 : f.path + " (" + strerror(f.err) + ")";
     case Failure::Kind::Closedir:
       return "unable to closedir " + f.path + " (" + strerror(f.err) + ")";
   }
@@ -400,28 +409,9 @@ void print_page_residency_chart(FILE *out, char *mincore_array, int64_t pages_in
 #endif
 
 
-// CLI-side ProgressSink: renders sink calls exactly as the monolith printed
-// them, keeping -v output byte-identical (tests/run.sh parses it).
-void print_page_residency_chart(FILE *out, char *mincore_array, int64_t pages_in_file); // fwd: defined below
-
-class ChartSink final : public cache::ProgressSink {
-public:
-  void on_file_start(std::string_view path) override {
-    printf("%.*s\n", static_cast<int>(path.size()), path.data());
-  }
-  void on_evicting(std::string_view path) override {
-    printf("Evicting %.*s\n", static_cast<int>(path.size()), path.data());
-  }
-  void on_chart(std::span<const unsigned char> pages, int64_t pages_in_file) override {
-    print_page_residency_chart(stdout,
-        const_cast<char*>(reinterpret_cast<const char*>(pages.data())), pages_in_file);
-  }
-  void on_file_done(std::string_view, int64_t, int64_t) override {
-    printf("\n");   // was the trailing printf("\n") of the verbose block
-  }
-};
-
-static ChartSink g_chart_sink;
+// B2 interim: the library-side sink layer is REMOVED (verbs return data;
+// no events). Per-file -v output (path echo + chart) is gone; the totals-
+// only CLI rewrite + run.sh rebuild land in B5/B6 per the ratified spec.
 static std::unique_ptr<Session> g_session;
 
 
@@ -598,7 +588,7 @@ static int run(int argc, char **argv) {
   // Options; owns the ChartSink. Failures are recorded as structured data
   // (A1); this formatter converts records to the historical text at print
   // time — the exact wording the monolith emitted.
-  g_session = std::make_unique<Session>(o, std::make_unique<ChartSink>());
+  g_session = std::make_unique<Session>(o);
   g_session->set_range(f);   // -p range applied to the session (used per file)
   // A2: no more WarnFn parameter — failures are structured records, drained
   // and formatted below (drain_failures). A3: the crawler is internal —
