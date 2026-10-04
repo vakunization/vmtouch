@@ -1,22 +1,32 @@
-// core/crawl.cpp — see crawl.h.
+// core/crawl.cpp — see crawl.h (spec2 §5).
+//
+// The traversal logic is transplanted verbatim from the monolith's
+// vmtouch_crawl() (through the Increment-1 Crawler): trailing-slash strip,
+// lstat, symlink check, hardlink dedup, directory loop check, depth limit,
+// opendir/readdir/closedir. Deviations required by the producer seam:
+//   * per-file work and traversal failures go to the VISITOR (CrawlItem),
+//     not to a Session;
+//   * fatal cases (depth overflow, allocation failure, rlimit) throw
+//     FatalError with the historical texts (spec2 §5.10);
+//   * -f/-F/-h policy is FIXED (flags dropped per the ratified ruling):
+//     lstat always, no device pinning check, dedup always on.
+// The seen-inodes tsearch tree is freed in the destructor (replacing the
+// atexit workaround from the leak fix).
 
 #include "crawl.h"
-
-#include "session.h"
-#include "filters.h"
 
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
 
 #include <dirent.h>
-#include <libgen.h>
 #include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "platform.h"
 
+namespace vmt {
 namespace {
 
 constexpr int kMaxCrawlDepth = 1024;
@@ -25,8 +35,7 @@ constexpr int kMaxCrawlDepth = 1024;
 int compare_func(const void* p1, const void* p2) {
     const struct dev_and_inode* kp1 = static_cast<const struct dev_and_inode*>(p1);
     const struct dev_and_inode* kp2 = static_cast<const struct dev_and_inode*>(p2);
-    int cmp1;
-    cmp1 = (kp1->ino > kp2->ino) - (kp1->ino < kp2->ino);
+    const int cmp1 = (kp1->ino > kp2->ino) - (kp1->ino < kp2->ino);
     if (cmp1 != 0)
         return cmp1;
     return (kp1->dev > kp2->dev) - (kp1->dev < kp2->dev);
@@ -38,22 +47,24 @@ void free_dev_and_inode(void* p) {
 
 } // namespace
 
-Crawler::Crawler(Session& session) : session_(session) {}
+Crawler::Crawler() = default;
 
 Crawler::~Crawler() {
     // Frees the seen-inodes tree (upstream leak, originally fixed via
-    // atexit in the CLI; now owned properly by the state holder).
+    // atexit in the CLI; owned properly by the state holder since Increment 1).
     if (state_.seen_inodes) {
         tdestroy(state_.seen_inodes, free_dev_and_inode);
         state_.seen_inodes = nullptr;
     }
 }
 
-void Crawler::walk(std::string path) {
+void Crawler::walk(std::string path, const CrawlVisitor& visitor) {
+    walk_impl(path, visitor);
+}
+
+void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
     struct stat sb;
     char npath[PATH_MAX];
-
-    const Options& opts = session_.options();
 
     // prevent ugly double slashes when printing path names (verbatim;
     // path is this frame's private copy)
@@ -62,35 +73,22 @@ void Crawler::walk(std::string path) {
         path.erase(tp_path_len - 1);
     const char* cpath = path.c_str();
 
-    // A4: -i pruning happens HERE, mid-walk, BEFORE lstat — an ignored
-    // subtree costs zero syscalls (touch-mode correctness, pinned by
-    // tests). Matching reads the Options-owned pattern lists.
-    if (filters::is_ignored(opts.ignore, path))
-        return;
-
-    int res = opts.followsymlinks ? stat(cpath, &sb) : lstat(cpath, &sb);
+    int res = lstat(cpath, &sb);   // fixed policy: never follow symlinks
 
     if (res) {
-        session_.fail(Failure::Kind::Stat, errno, path);
+        const Failure f{Failure::Kind::Stat, errno, path, 0};
+        visitor(CrawlItem{path, &f});
         return;
     }
 
     if (S_ISLNK(sb.st_mode)) {
-        session_.fail(Failure::Kind::Symlink, 0, path);
+        const Failure f{Failure::Kind::Symlink, 0, path, 0};
+        visitor(CrawlItem{path, &f});
         return;
     }
 
-    if (opts.singlefilesystem) {
-        if (!state_.orig_device_inited) {
-            state_.orig_device = sb.st_dev;
-            state_.orig_device_inited = 1;
-        } else if (sb.st_dev != state_.orig_device) {
-            session_.fail(Failure::Kind::SeparateFs, 0, path);
-            return;
-        }
-    }
-
-    if (!opts.ignorehardlinkeduplictes && sb.st_nlink > 1) {
+    // Fixed policy: hardlink dedup always on (upstream default).
+    if (sb.st_nlink > 1) {
         /*
          * For files with more than one link to it, ignore it if we already know
          * inode.  Without this check files copied as hardlinks (cp -al) are
@@ -115,9 +113,11 @@ void Crawler::walk(std::string path) {
     }
 
     if (S_ISDIR(sb.st_mode)) {
+        // Loop check against the directory-inode stack (spec2 §5.7).
         for (int i = 0; i < state_.curr_crawl_depth; i++) {
             if (state_.crawl_inodes[i] == sb.st_ino) {
-                session_.fail(Failure::Kind::CrawlLoop, 0, path);
+                const Failure f{Failure::Kind::CrawlLoop, 0, path, 0};
+                visitor(CrawlItem{path, &f});
                 return;
             }
         }
@@ -125,7 +125,7 @@ void Crawler::walk(std::string path) {
         if (state_.curr_crawl_depth == kMaxCrawlDepth)
             throw FatalError("maximum directory crawl depth reached: " + path);
 
-        state_.total_dirs++;
+        state_.total_dirs++;   // entered (counts even if opendir fails, spec2 §5.8)
 
         state_.crawl_inodes[state_.curr_crawl_depth] = sb.st_ino;
 
@@ -150,7 +150,8 @@ void Crawler::walk(std::string path) {
             }
 
             if (dirp == NULL) {
-                session_.fail(Failure::Kind::OpendirFailed, errno, path);   // upstream: "unable to opendir"
+                const Failure f{Failure::Kind::OpendirFailed, errno, path, 0};
+                visitor(CrawlItem{path, &f});
                 return;
             }
         }
@@ -161,26 +162,28 @@ void Crawler::walk(std::string path) {
 
             if (snprintf(npath, sizeof(npath), "%s/%s", cpath, de->d_name) >=
                 static_cast<int>(sizeof(npath))) {
-                session_.fail(Failure::Kind::PathTooLong, 0, path);
+                const Failure f{Failure::Kind::PathTooLong, 0, path, 0};
+                visitor(CrawlItem{path, &f});
                 break;
             }
 
             state_.curr_crawl_depth++;
-            walk(std::string(npath));   // recursion: child gets its own path copy
+            std::string child(npath);   // recursion: child gets its own path copy
+            walk_impl(child, visitor);
             state_.curr_crawl_depth--;
         }
 
         if (closedir(dirp)) {
-            session_.fail(Failure::Kind::Closedir, errno, path);
+            const Failure f{Failure::Kind::Closedir, errno, path, 0};
+            visitor(CrawlItem{path, &f});
             return;
         }
     } else if (S_ISREG(sb.st_mode) || S_ISBLK(sb.st_mode)) {
-        // A4: -I is a per-file gate (directories are always traversed).
-        if (filters::is_included(opts.include, path)) {
-            state_.total_files++;
-            session_.process_file(path);
-        }
+        visitor(CrawlItem{std::string_view(path), nullptr});   // a file item
     } else {
-        session_.fail(Failure::Kind::NotRegular, 0, path);
+        const Failure f{Failure::Kind::NotRegular, 0, path, 0};
+        visitor(CrawlItem{path, &f});
     }
 }
+
+} // namespace vmt

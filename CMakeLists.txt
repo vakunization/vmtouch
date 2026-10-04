@@ -7,7 +7,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(vmtouch_core STATIC
     src/core/platform.cpp
-    src/core/filters.cpp
     src/core/cache.cpp
     src/core/session.cpp
     src/core/crawl.cpp
@@ -46,7 +45,6 @@ install(TARGETS vmtouch
 add_executable(unit_tests
     tests/unit/main.cpp
     tests/unit/test_platform.cpp
-    tests/unit/test_filters.cpp
     tests/unit/test_file_handle.cpp
     tests/unit/test_cache.cpp
     tests/unit/test_session.cpp

@@ -40,9 +40,9 @@ struct Options {
     bool lock = 0;
     bool lockall = 0;
     bool daemon = 0;
-    bool followsymlinks = 0;
-    bool singlefilesystem = 0;
-    bool ignorehardlinkeduplictes = 0;   // spelling preserved from upstream
+    bool followsymlinks = 0;      // B3: inert (flags dropped per ratified spec)
+    bool singlefilesystem = 0;    // B3: inert
+    bool ignorehardlinkeduplictes = 0;   // spelling preserved from upstream; B3: inert
     size_t max_file_size = SIZE_MAX;
     bool wait = 0;
     const char* batch = nullptr;
@@ -50,11 +50,9 @@ struct Options {
     const char* output = nullptr;
     int zero_delim = 0;
 
-    // A4: filters are caller policy — plain pattern lists on Options
-    // (approved A4 shape). `ignore` is the -i list (subtree PRUNE during
-    // traversal); `include` is the -I list (per-file gate).
-    std::vector<std::string> ignore;
-    std::vector<std::string> include;
+    // B3: the filter lists are REMOVED from the library (ratified spec:
+    // fixed traversal policy). The CLI keeps accepting -i/-I until B5
+    // deletes the flags; the patterns are parsed and discarded.
 };
 
 // Per-file selection range (from -p). Was "struct FileInfo" in the monolith;

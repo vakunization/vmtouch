@@ -208,13 +208,12 @@ out=$("$VMFILE" -v "$T/long"  2>&1); eq "$(t_of "$out" "$T/long")"  2 "page+1 by
 
 # --- extended characterization coverage (pinned before core extraction) ---
 
-# hardlink dedup: default counts once, -h counts each path
+# hardlink dedup: default counts once (fixed policy; -h is gone per the
+# ratified spec — both names share one inode and are emitted once).
 mk "$T/hl" 3
 ln "$T/hl" "$T/hl2"
 out=$("$VMFILE" -v "$T/hl" "$T/hl2" 2>&1)
 has "$out" "Files: 1" "hardlink dedup: two hardlinks counted as one file"
-out=$("$VMFILE" -v -h "$T/hl" "$T/hl2" 2>&1)
-has "$out" "Files: 2" "-h counts hardlinked copies separately"
 
 # -I: B2 interim — inert (see the -i block above)
 out=$("$VMFILE" -v -I '*.log' "$T/d" >/dev/null 2>&1); rc_is $? 0 "-I accepted (inert interim)"
@@ -287,21 +286,20 @@ has "$out" "smaller than offset" "-p beyond EOF warns"
 out=$("$VMFILE" -v "$T/d/" 2>&1); rc_is $? 0 "trailing slash exits 0"
 has "$out" "Files: 4" "trailing slash: directory still crawled (files counted)"
 
-# symlink loop with -f: detected, terminates with exit 0.
-# Note: without -h the hardlink-dedup check (dirs have st_nlink>=2) returns
-# silently before the loop check fires — pinned behavior; -h disables dedup
-# so the explicit loop warning is reachable.
+# symlink loop: with symlinks never followed (fixed policy), the loop is
+# not traversed — the link itself yields a Symlink error and the walk
+# terminates (exit 0). The inode-stack loop check is defense in depth
+# (pinned at unit level in test_crawl.cpp); without -f it is unreachable.
 ln -s "$T/d" "$T/d/loop"
-out=$("$VMFILE" -v -f -h "$T/d" 2>&1); rc_is $? 0 "symlink loop exits 0"
-has "$out" "symbolic link loop detected" "symlink loop detected under -f -h"
+out=$("$VMFILE" -v "$T/d" 2>&1); rc_is $? 0 "walk with a symlink inside exits 0"
+has "$out" "not following symbolic link" "symlink inside tree: not followed"
 ln -s "$T/d" "$T/d/loop2"
-out=$("$VMFILE" -v -f "$T/d/loop2" 2>&1); rc_is $? 0 "symlink-to-dir with -f exits 0"
-has "$out" "Files: 4" "-f on symlink-to-dir: contents processed once (dedup)"
+out=$("$VMFILE" -v "$T/d/loop2" 2>&1); rc_is $? 0 "symlink root: exits 0"
+has "$out" "not following symbolic link" "symlink root: not followed"
 out=$("$VMFILE" -v "$T/d/loop2" 2>&1)
 has "$out" "not following symbolic link" "symlink without -f: not followed"
-grep -qF -- "$T/d/loop" <<<"$("$VMFILE" -v -f "$T/d" 2>&1)" \
-  && fail "loop under -f" "infinite traversal" \
-  || ok "loop under -f terminates"
+# Termination under a would-be loop: the CLI must always exit (no hang).
+out=$(timeout 10 "$VMFILE" -v "$T/d" 2>&1); rc_is $? 0 "no infinite traversal"
 
 echo
 echo "$PASS passed, $FAIL failed"

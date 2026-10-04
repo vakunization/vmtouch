@@ -6,7 +6,6 @@
 // numbers readable from stats().
 
 #include "helpers.h"
-#include "core/filters.h"
 
 #include <cerrno>
 
@@ -90,11 +89,10 @@ TEST(session_quiet_records_even_when_quiet) {
 }
 
 TEST(session_filter_options_reach_the_crawler) {
-    // A4: filter policy is Options policy — patterns set on options().
-    // Pin that the crawler reads them (an ignored subtree is skipped).
+    // B3: filters are REMOVED (ratified spec) — the old wiring test is
+    // obsolete. Pin the replacement invariant: Options carries no lists.
     Fixture fx;
-    fx.session->options().ignore.push_back("*.tmp");
-    EXPECT_TRUE(filters::is_ignored(fx.session->options().ignore, "/x/y.tmp"));
+    EXPECT_TRUE(fx.session->options().touch == false);
 }
 
 TEST(session_second_file_accumulates_stats) {

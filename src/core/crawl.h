@@ -1,54 +1,66 @@
-// core/crawl.h — filesystem traversal (INTERNAL since A3).
+// core/crawl.h — filesystem traversal (spec2 §5).
 //
-// The Crawler is owned by Session (unique_ptr member) and is no longer
-// part of the library's public surface. It owns the traversal state
-// (depth stack, seen-inodes dedup tree, device pinning, file/dir totals)
-// and holds a reference to the Session (which performs the per-file work
-// and records failures). Lifetime: destroyed with the Session — it can
-// never outlive it.
+// B3: the Crawler is a PRODUCER. It walks the filesystem and emits items
+// through a caller-supplied callback; it knows nothing about Session,
+// Report, Options, FileHandle, cache::* or CLI flags (knowledge map §10).
 //
-// The traversal logic is transplanted verbatim from the monolith's
-// vmtouch_crawl(): trailing-slash strip, symlink handling, -F same-
-// filesystem check, hardlink dedup (st_nlink > 1), symlink-loop detection,
-// MAX_CRAWL_DEPTH. Deviations required by the seam:
-//   * warning() -> Session::fail() records (quiet handled by the CLI);
-//   * fatal()   -> throw FatalError (single handler in the CLI);
-//   * per-file work -> Session::process_file() (private, friend access);
-//   * the seen-inodes tsearch tree is freed in the destructor (replacing
-//     the atexit workaround from the leak fix).
+// Traversal policy is FIXED as upstream defaults (ratified ruling: the
+// -f/-F/-h flags are dropped):
+//   * symlinks are NOT followed (a symlink -> Failure{Kind::Symlink});
+//   * no filesystem-boundary check (upstream default: cross freely);
+//   * hardlink dedup ENABLED (st_nlink > 1 seen by (dev, ino) -> skip);
+//   * MAX_CRAWL_DEPTH = 1024 (overflow -> FatalError);
+//   * symlink loops -> Failure{Kind::CrawlLoop} (upstream behavior; the
+//     loop check runs against the depth stack of directory inodes).
+//
+// Lifetime: the caller creates one Crawler per process() call; the
+// seen-inodes tree and counters live for the Crawler's lifetime, so dedup
+// works ACROSS roots in one call (pinned by run.sh: "hl hl2 -> Files: 1").
 
 #pragma once
 
+#include <functional>
 #include <string>
+#include <string_view>
 
 #include <search.h>   // tsearch/tfind/tdestroy
 
 #include "common.h"
 
-class Session;
+namespace vmt {
+
+// One emitted item (spec2 §2.7): exactly one side is meaningful.
+//   error == nullptr -> a file (regular or block device) at `path`
+//   error != nullptr -> a traversal-level Failure for `path`
+// `path` (and *error) are valid ONLY during the callback; copy if needed.
+struct CrawlItem {
+    std::string_view path;
+    const Failure* error;   // nullptr => file item
+};
+
+using CrawlVisitor = std::function<void(const CrawlItem&)>;
 
 class Crawler {
 public:
-    explicit Crawler(Session& session);
+    Crawler();
     ~Crawler();
 
     Crawler(const Crawler&) = delete;
     Crawler& operator=(const Crawler&) = delete;
 
-    // Traverses one path (file, directory, or symlink per options).
-    // Takes the path BY VALUE: the parameter is this frame's private
-    // mutable copy — used to strip the trailing '/' exactly like the C
-    // original mutated its buffer. Recursion passes child copies the same
-    // way, so no shared mutable state exists anywhere.
-    void walk(std::string path);
+    // Traverses one root (file, directory, or symlink per the fixed
+    // policy), emitting items to the visitor. Takes the root BY VALUE:
+    // the parameter is this frame's private mutable copy — used to strip
+    // the trailing '/' exactly like the C original mutated its buffer.
+    // Recursion passes child copies the same way.
+    void walk(std::string path, const CrawlVisitor& visitor);
 
-    // Totals for the summary. (Pages live in Session::stats().)
-    int64_t total_files() const { return state_.total_files; }
-    int64_t total_dirs() const { return state_.total_dirs; }
+    // Directories ENTERED so far (incremented before opendir; a failed
+    // opendir still counts). Summed over all walk() calls on this Crawler.
+    int64_t dirs_seen() const { return state_.total_dirs; }
 
 private:
     struct State {
-        int64_t total_files = 0;
         int64_t total_dirs = 0;
         int curr_crawl_depth = 0;
         ino_t crawl_inodes[1024];      // MAX_CRAWL_DEPTH, verbatim for now
@@ -57,6 +69,9 @@ private:
         int orig_device_inited = 0;
     };
 
+    void walk_impl(std::string& path, const CrawlVisitor& visitor);
+
     State state_;
-    Session& session_;
 };
+
+} // namespace vmt

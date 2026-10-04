@@ -1,17 +1,14 @@
 // core/session.h — the façade that owns per-run state and drives the
-// per-file pipeline: open -> checks -> cache verb dispatch, plus the
-// internal filesystem traversal (A3: Session absorbs Crawler).
+// pipeline: crawl (producer) -> open -> verb dispatch.
 //
-// Public surface (A3, per the approved plan):
-//   process(path)            — one path; directories are traversed
-//   process_fd(fd, off, len) — caller-owned fd (S3: no re-open by path)
-//   report()                 — totals (files/dirs) + stats snapshot
-//   failures()               — structured failure records (A1)
+// B3 interim state (the full process/Report rewrite is B4): the public
+// surface is still the A3 trio — process(path)/process_fd/report() — but
+// the Session is now the Crawler's VISITOR: it opens files via FileHandle
+// and dispatches verbs; traversal failures arrive as CrawlItem.error.
 //
 // Ownership: the application owns the Session; the Session owns Stats,
-// the ProgressSink, the kept regions (-l/-L mappings stay alive for
-// process lifetime) and the traversal state (A3). Filter policy lives on
-// Options (A4) — the Session holds no filter state.
+// the kept regions (-l/-L mappings stay alive for process lifetime) and
+// a Crawler per process() call (dedup works across roots within one call).
 
 #pragma once
 
@@ -25,27 +22,25 @@
 
 class Session {
 public:
-    // sink parameter is a B2 interim artifact (the sink layer is dead —
-    // no events fire); B4 removes it entirely.
-    Session(Options opts);
+    explicit Session(Options opts);
     ~Session();
 
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 
-    // ---- public pipeline (A3 names) --------------------------------------
+    // ---- public pipeline (A3 names; B4 replaces with process(span)/get_report) ----
 
-    // Processes one path: regular file or block device via the per-file
-    // pipeline; directories via the internal crawler. Symlinks/filters/
-    // dedup semantics are the crawler's (unchanged, pinned by tests).
+    // Processes one path: files are opened + dispatched; directories are
+    // crawled (fixed upstream policy — no -f/-F/-h; filters are gone).
+    // Returns Skipped iff this call recorded new failures, Ok otherwise;
+    // FatalError propagates (B4 converts at the boundary).
     Status process(const std::string& path);
 
     // S3 entry: the caller's ALREADY-OPEN fd. No open-by-path, no close —
     // the fd stays the caller's. offset/max_len are the -p range.
     Status process_fd(int fd, int64_t offset, int64_t max_len);
 
-    // Totals snapshot: crawler counters + page stats, plain data (A5 will
-    // formalize the Report vocabulary; today it is a small aggregate).
+    // Totals snapshot: crawler counters + page stats, plain data.
     struct Report {
         int64_t total_files = 0;
         int64_t total_dirs = 0;
@@ -60,12 +55,11 @@ public:
     }
     const std::vector<Failure>& failures() const { return failures_; }
 
-    // ---- wiring surface (CLI/tests until A4/A5 move it) -------------------
+    // ---- wiring surface (CLI/tests until B4/B5 move it) -------------------
 
     const Stats& stats() const { return stats_; }
     Stats& stats() { return stats_; }
     const Options& options() const { return opts_; }
-    Options& options() { return opts_; }   // A4: tests/CLI mutate filter lists pre-walk
     const FileInfoRange& range() const { return range_; }
     void set_range(const FileInfoRange& r) { range_ = r; }   // CLI applies -p here
 
@@ -75,24 +69,16 @@ private:
     FileInfoRange range_;
     std::vector<Failure> failures_;
     std::vector<cache::MappedRegion> kept_regions_;   // -l/-L: alive for process lifetime
+    int64_t total_files_ = 0;   // B3 interim counters (B4: per-call Report)
+    int64_t total_dirs_ = 0;
+    std::unique_ptr<vmt::Crawler> crawler_;   // B3 interim: session-lifetime (B4: per-call)
 
-    // A3: the crawler is INTERNAL — owned here, never exposed. It reports
-    // per-file work back through this session (walk() below) and its
-    // totals flow into report().
-    std::unique_ptr<Crawler> crawler_;
-
-    // Per-file pipeline (A2 shape, renamed from the public process_file):
-    // open with O_NOATIME + EPERM fallback, EMFILE/ENFILE retry, verb
-    // dispatch, result classification. Called by process() for regular
-    // files and (before A3) directly by tests; internal from now on.
+    // Per-file pipeline (the visitor body): open via FileHandle, verb
+    // dispatch, result classification. Called by the crawler callback.
     Status process_file(const std::string& path);
 
-    // A3: shared verb dispatch + classification for an ALREADY-OPEN fd.
+    // Shared verb dispatch + classification for an ALREADY-OPEN fd.
     // Does not close the fd — the open-path owner (process_file) or the
     // external caller (process_fd) keeps ownership.
     Status run_verb_on_fd(int fd, const std::string& path, const FileInfoRange& range);
-
-    // Crawler access to the per-file pipeline (friendship keeps process_file
-    // private; the crawler is the only caller besides process() itself).
-    friend class Crawler;
 };

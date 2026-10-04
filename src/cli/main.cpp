@@ -74,7 +74,6 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 
 #include "core/common.h"
 #include "core/platform.h"
-#include "core/filters.h"
 #include "core/cache.h"
 #include "core/session.h"
 #include "core/crawl.h"
@@ -351,18 +350,11 @@ void parse_range(char *inp, FileInfoRange& f) {
 }
 
 
-// -i/-I parsing (A4): patterns are plain lists on Options; the fatal caps
-// (too long / too many patterns) live in filters::add_* with identical
-// message text.
-void parse_ignore_item(const char *inp, Options& o) {
-  if (inp == NULL) return;
-  filters::add_ignore(o.ignore, inp);
-}
-
-void parse_filename_filter_item(const char *inp, Options& o) {
-  if (inp == NULL) return;
-  filters::add_include(o.include, inp);
-}
+// -i/-I (B3): the filters are REMOVED from the library (ratified spec);
+// the flags stay getopt-accepted until B5 deletes them and are parsed
+// into the void. No fatal caps anymore — nothing to enforce them on.
+void parse_ignore_item(const char * /*inp*/, Options& /*o*/) {}
+void parse_filename_filter_item(const char * /*inp*/, Options& /*o*/) {}
 
 
 

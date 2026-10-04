@@ -1,14 +1,12 @@
 // core/session.cpp — see session.h.
 //
-// B2 interim state (full rewrite lands in B4): the pipeline still runs
-// through process()/process_file()/run_verb_on_fd(), but the verb layer
-// now speaks the spec language — cache::* returns Result<VerbOutcome> and
-// throws FatalError; there are NO sinks anymore (the -v sink wiring is
-// removed; totals-only output arrives with the CLI rewrite in B5).
+// B3: the Session is the Crawler's VISITOR. process() creates a Crawler
+// per call and walks the given root; the visitor body opens files via
+// FileHandle and dispatches verbs; traversal failures arrive as
+// CrawlItem.error and become Failure records here.
 //
-// Fatal handling (owner rulings): FatalError propagates for now; B4
-// converts it to Status::Fatal + a Failure{Kind::Fatal} record at the
-// public boundary.
+// Fatal handling: FatalError propagates for now; B4 converts it to
+// Status::Fatal + a Failure{Kind::Fatal} record at the public boundary.
 
 #include "session.h"
 
@@ -34,30 +32,44 @@ cache::Verb verb_from_options(const Options& o) {
 
 } // namespace
 
-Session::Session(Options opts)
-    : opts_(std::move(opts)),
-      crawler_(std::make_unique<Crawler>(*this)) {}
+Session::Session(Options opts) : opts_(std::move(opts)) {}
 
 Session::~Session() = default;
 
-// ---- A3 public surface ------------------------------------------------------
+// ---- public surface ---------------------------------------------------------
 
 Status Session::process(const std::string& path) {
-    // Contract (preserves the old process_file semantics at the A3 API):
-    // Skipped iff this call recorded new failures (the path or something in
-    // its subtree was skipped), Ok if everything processed. FatalError
-    // propagates; the CLI exit code is unaffected either way (run.sh pins
-    // "missing path exits 0").
-    const size_t before = failures_.size();
-    crawler_->walk(path);
-    return failures_.size() > before ? Status::Skipped : Status::Ok;
+    // B3 interim: ONE Crawler for the Session's lifetime so the CLI's
+    // per-argv process() loop keeps cross-root dedup (run.sh pins "hl hl2
+    // -> Files: 1"). B4 restores per-call state when the span-taking
+    // process(paths) lands (one call, all roots, one Report).
+    if (!crawler_)
+        crawler_ = std::make_unique<vmt::Crawler>();
+
+    const size_t failures_before = failures_.size();
+
+    auto visitor = [&](const vmt::CrawlItem& item) {
+        if (item.error != nullptr) {
+            // Traversal-level failure (stat/symlink/not-regular/loop/...):
+            // recorded, never thrown (spec2 §5.10).
+            fail(item.error->kind, item.error->err, std::string(item.path), item.error->offset);
+            return;
+        }
+
+        ++total_files_;
+        (void)process_file(std::string(item.path));
+    };
+
+    crawler_->walk(path, visitor);
+    total_dirs_ += crawler_->dirs_seen();
+
+    return failures_.size() > failures_before ? Status::Skipped : Status::Ok;
 }
 
 Status Session::process_fd(int fd, int64_t offset, int64_t max_len) {
     // S3: the fd is the caller's — never closed here, never re-opened by
     // path. Range policy comes from the caller (offset/max_len); size
-    // policy (-m) and the verb follow the session's options, exactly like
-    // process_file().
+    // policy (-m) and the verb follow the session's options.
     if (fd < 0) {
         fail(Failure::Kind::Open, EBADF, "", offset);
         return Status::Skipped;
@@ -70,10 +82,8 @@ Status Session::process_fd(int fd, int64_t offset, int64_t max_len) {
 
 Session::Report Session::report() const {
     Report r;
-    if (crawler_) {
-        r.total_files = crawler_->total_files();
-        r.total_dirs = crawler_->total_dirs();
-    }
+    r.total_files = total_files_;
+    r.total_dirs = total_dirs_;
     r.stats = stats_;
     return r;
 }
@@ -81,21 +91,15 @@ Session::Report Session::report() const {
 // ---- per-file pipeline -------------------------------------------------------
 
 Status Session::process_file(const std::string& path) {
-    // B1: the open/retry logic lives in FileHandle now (verbatim move);
-    // the fd is owned by the handle and closed on every exit path below.
+    // B1: the open/retry logic lives in FileHandle; the fd is owned by
+    // the handle and closed on every exit path below.
     auto opened = vmt::FileHandle::open(path);
     if (opened.is_error()) {
         fail(opened.error().kind, opened.error().err, path);
         return Status::Skipped;
     }
 
-    Status st;
-    try {
-        st = run_verb_on_fd(opened.value().fd(), path, range_);
-    } catch (...) {
-        throw;
-    }
-    return st;
+    return run_verb_on_fd(opened.value().fd(), path, range_);
 }
 
 Status Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRange& range) {
@@ -107,8 +111,7 @@ Status Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRa
     //                     Status::Skipped;
     //   Ok(VerbOutcome)-> stats absorbed; region kept iff lock/lockall,
     //                     else the session munmaps it here (MunmapFailed
-    //                     record with path context on failure — the
-    //                     upstream warning keeps its text);
+    //                     record with path context on failure);
     //   FatalError     -> propagates (B4 converts at the public boundary).
 
     cache::Params params;
@@ -151,4 +154,3 @@ Status Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRa
 
     return Status::Ok;
 }
-
