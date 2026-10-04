@@ -1,18 +1,30 @@
-// core/session.h — the façade that owns per-run state and drives the
-// pipeline: crawl (producer) -> open -> verb dispatch.
+// core/session.h — the façade (spec2 §3/§4). B4: the ratified public
+// surface — one error language, one Report per process call.
 //
-// B3 interim state (the full process/Report rewrite is B4): the public
-// surface is still the A3 trio — process(path)/process_fd/report() — but
-// the Session is now the Crawler's VISITOR: it opens files via FileHandle
-// and dispatches verbs; traversal failures arrive as CrawlItem.error.
+//   Session(Options)
+//   Status process(std::span<const std::string> paths)   // noexcept
+//   Status process_fd(int fd, int64_t offset, int64_t max_len)
+//   const Report& get_report() const
 //
-// Ownership: the application owns the Session; the Session owns Stats,
-// the kept regions (-l/-L mappings stay alive for process lifetime) and
-// a Crawler per process() call (dedup works across roots within one call).
+// Contract (owner rulings folded in):
+//   * process() NEVER throws: FatalError is caught at the boundary and
+//     converted to Status::Fatal + a Failure{Kind::Fatal} record;
+//   * process_fd() behaves EXACTLY like process() (same Report semantics,
+//     same fatal handling) — only the input differs: the caller's fd is
+//     neither opened nor closed by the library;
+//   * ONE process/process_fd call fills ONE Report (reset at entry);
+//     get_report() returns it; the Report of a fatal call holds everything
+//     accumulated up to the failure point INCLUDING the Fatal record;
+//   * kept_regions_ (Lock) accumulates across calls; the Session must not
+//     be destroyed while the locks are needed;
+//   * collect_failures (Options) gates Report.failures EXCEPT the Fatal
+//     record, which is always stored (it is the only fatal channel).
 
 #pragma once
 
+#include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -22,63 +34,56 @@
 
 class Session {
 public:
+    // The call result (spec2 §2.5). Invariants:
+    //   total_files — files DISCOVERED (before open); includes empty files
+    //                 and files that later fail;
+    //   failed      — files not processed toward the goal (open/verb/crawl
+    //                 failures); empty files are NOT failed;
+    //   failures.size() == failed when collect_failures is set (the Fatal
+    //                 record is always appended, so under collect_failures
+    //                 failures.size() == failed + (fatal ? 1 : 0));
+    //   elapsed_seconds — wall clock of the call, measured through fatals.
+    struct Report {
+        int64_t total_files = 0;
+        int64_t failed = 0;
+        int64_t total_dirs = 0;
+        int64_t total_pages = 0;
+        int64_t total_pages_in_core = 0;
+        double elapsed_seconds = 0.0;
+        std::vector<Failure> failures;   // gated by Options::collect_failures (+ always Fatal)
+    };
+
     explicit Session(Options opts);
     ~Session();
 
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 
-    // ---- public pipeline (A3 names; B4 replaces with process(span)/get_report) ----
+    // Traverses and processes all roots; order preserved. An empty list is
+    // valid (zeroed Report). Never throws (noexcept below in the .cpp via
+    // the wrapper; declared here for clarity).
+    Status process(std::span<const std::string> paths) noexcept;
 
-    // Processes one path: files are opened + dispatched; directories are
-    // crawled (fixed upstream policy — no -f/-F/-h; filters are gone).
-    // Returns Skipped iff this call recorded new failures, Ok otherwise;
-    // FatalError propagates (B4 converts at the boundary).
-    Status process(const std::string& path);
+    // S3: caller-owned fd; same Report semantics as process(). Never throws.
+    Status process_fd(int fd, int64_t offset, int64_t max_len) noexcept;
 
-    // S3 entry: the caller's ALREADY-OPEN fd. No open-by-path, no close —
-    // the fd stays the caller's. offset/max_len are the -p range.
-    Status process_fd(int fd, int64_t offset, int64_t max_len);
-
-    // Totals snapshot: crawler counters + page stats, plain data.
-    struct Report {
-        int64_t total_files = 0;
-        int64_t total_dirs = 0;
-        Stats stats;
-    };
-    Report report() const;
-
-    // ---- structured failures (A1, unchanged) ------------------------------
-
-    void fail(Failure::Kind kind, int err, const std::string& path, int64_t offset = 0) {
-        failures_.push_back(Failure{kind, err, path, offset});
-    }
-    const std::vector<Failure>& failures() const { return failures_; }
-
-    // ---- wiring surface (CLI/tests until B4/B5 move it) -------------------
-
-    const Stats& stats() const { return stats_; }
-    Stats& stats() { return stats_; }
-    const Options& options() const { return opts_; }
-    const FileInfoRange& range() const { return range_; }
-    void set_range(const FileInfoRange& r) { range_ = r; }   // CLI applies -p here
+    // The Report of the LAST process()/process_fd() call. Valid until the
+    // next call or destruction. Before any call: a zeroed Report.
+    const Report& get_report() const { return report_; }
 
 private:
+    // One discovered file: open -> dispatch -> classify (visitor body).
+    void handle_file(const std::string& path, Report& r);
+
+    // Verb dispatch + classification for an already-open fd. Does NOT
+    // close the fd. Returns the Failure on Failed; throws FatalError.
+    bool run_verb_on_fd(int fd, const std::string& path, const FileInfoRange& range,
+                        Report& r);
+
+    // The boundary wrapper: catches FatalError -> Status::Fatal + record.
+    Status catch_fatal_and_run(const std::function<void(Report&)>& body, Report& r) noexcept;
+
     Options opts_;
-    Stats stats_;
-    FileInfoRange range_;
-    std::vector<Failure> failures_;
-    std::vector<cache::MappedRegion> kept_regions_;   // -l/-L: alive for process lifetime
-    int64_t total_files_ = 0;   // B3 interim counters (B4: per-call Report)
-    int64_t total_dirs_ = 0;
-    std::unique_ptr<vmt::Crawler> crawler_;   // B3 interim: session-lifetime (B4: per-call)
-
-    // Per-file pipeline (the visitor body): open via FileHandle, verb
-    // dispatch, result classification. Called by the crawler callback.
-    Status process_file(const std::string& path);
-
-    // Shared verb dispatch + classification for an ALREADY-OPEN fd.
-    // Does not close the fd — the open-path owner (process_file) or the
-    // external caller (process_fd) keeps ownership.
-    Status run_verb_on_fd(int fd, const std::string& path, const FileInfoRange& range);
+    Report report_;                                  // last call's Report
+    std::vector<cache::MappedRegion> kept_regions_;  // Lock: alive for process lifetime
 };

@@ -1,33 +1,33 @@
-// core/session.cpp — see session.h.
+// core/session.cpp — see session.h (spec2 §4).
 //
-// B3: the Session is the Crawler's VISITOR. process() creates a Crawler
-// per call and walks the given root; the visitor body opens files via
-// FileHandle and dispatches verbs; traversal failures arrive as
-// CrawlItem.error and become Failure records here.
+// B4: the orchestrator. Two Report-update points (spec2 §4.6):
+//   1. FileHandle::open failed -> failed++, failures[] (gated);
+//   2. cache::* returned Failed -> failed++, failures[] (gated).
+// Crawl errors arrive via CrawlItem.error and count as failed BEFORE any
+// total_files++ (they are not files). Ok absorbs the stats; Lock keeps
+// the region. Empty file: silent Ok (no failed, no record).
 //
-// Fatal handling: FatalError propagates for now; B4 converts it to
-// Status::Fatal + a Failure{Kind::Fatal} record at the public boundary.
+// Fatal boundary: catch_fatal_and_run catches FatalError, records
+// Failure{Kind::Fatal, err, path-ish-text} ALWAYS (not gated), sets
+// elapsed even on the fatal path, and returns Status::Fatal.
 
 #include "session.h"
 
-#include <cerrno>
-#include <cstring>
-
-#include <fcntl.h>
-#include <unistd.h>
+#include <chrono>
 
 #include "file_handle.h"
-#include "platform.h"
 
 namespace {
 
-// A5: the verb vocabulary is cache::Verb (docs/vocabulary.md); the
-// Options->Verb mapping lives here (session policy).
 cache::Verb verb_from_options(const Options& o) {
     if (o.evict) return cache::Verb::Evict;
     if (o.lock)  return cache::Verb::Lock;
     if (o.touch) return cache::Verb::Warm;
     return cache::Verb::Inspect;
+}
+
+double wall_seconds_since(const std::chrono::steady_clock::time_point& t) {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
 }
 
 } // namespace
@@ -36,91 +36,114 @@ Session::Session(Options opts) : opts_(std::move(opts)) {}
 
 Session::~Session() = default;
 
-// ---- public surface ---------------------------------------------------------
+// ---------------------------------------------------------------------------
 
-Status Session::process(const std::string& path) {
-    // B3 interim: ONE Crawler for the Session's lifetime so the CLI's
-    // per-argv process() loop keeps cross-root dedup (run.sh pins "hl hl2
-    // -> Files: 1"). B4 restores per-call state when the span-taking
-    // process(paths) lands (one call, all roots, one Report).
-    if (!crawler_)
-        crawler_ = std::make_unique<vmt::Crawler>();
+Status Session::catch_fatal_and_run(const std::function<void(Report&)>& body, Report& r) noexcept {
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        body(r);
+        r.elapsed_seconds = wall_seconds_since(start);
+        return Status::Ok;
+    } catch (const FatalError& e) {
+        // The one fatal channel: ALWAYS recorded (not gated by
+        // collect_failures — the caller must be able to see what stopped
+        // the traversal). The engine's message text rides in `path`
+        // (kind=Fatal has no site path of its own).
+        Failure f;
+        f.kind = Failure::Kind::Fatal;
+        f.err = 0;
+        f.path = e.what();
+        f.offset = 0;
+        r.failures.push_back(std::move(f));
+        r.elapsed_seconds = wall_seconds_since(start);
+        return Status::Fatal;
+    }
+}
 
-    const size_t failures_before = failures_.size();
+Status Session::process(std::span<const std::string> paths) noexcept {
+    report_ = Report{};   // ONE call — ONE Report (reset at entry)
 
-    auto visitor = [&](const vmt::CrawlItem& item) {
-        if (item.error != nullptr) {
-            // Traversal-level failure (stat/symlink/not-regular/loop/...):
-            // recorded, never thrown (spec2 §5.10).
-            fail(item.error->kind, item.error->err, std::string(item.path), item.error->offset);
+    return catch_fatal_and_run([&](Report& r) {
+        // Per-call crawler state: dedup holds across ALL roots within the
+        // call (run.sh pins "hl hl2 -> Files: 1"), never across calls.
+        vmt::Crawler crawler;
+
+        auto visitor = [&](const vmt::CrawlItem& item) {
+            if (item.error != nullptr) {
+                // Traversal failure: not a file — no total_files++.
+                ++r.failed;
+                if (opts_.collect_failures)
+                    r.failures.push_back(*item.error);
+                return;
+            }
+            handle_file(std::string(item.path), r);
+        };
+
+        for (const auto& root : paths)
+            crawler.walk(root, visitor);
+
+        r.total_dirs = crawler.dirs_seen();
+    }, report_);
+}
+
+Status Session::process_fd(int fd, int64_t offset, int64_t max_len) noexcept {
+    report_ = Report{};   // same Report semantics as process() (owner amendment)
+
+    return catch_fatal_and_run([&](Report& r) {
+        if (fd < 0) {
+            ++r.failed;
+            if (opts_.collect_failures)
+                r.failures.push_back(Failure{Failure::Kind::Open, EBADF, "", offset});
             return;
         }
 
-        ++total_files_;
-        (void)process_file(std::string(item.path));
-    };
+        FileInfoRange range;
+        range.offset = offset;
+        range.max_len = max_len;
 
-    crawler_->walk(path, visitor);
-    total_dirs_ += crawler_->dirs_seen();
+        if (run_verb_on_fd(fd, "", range, r))
+            return;   // Ok (or silent skip)
 
-    return failures_.size() > failures_before ? Status::Skipped : Status::Ok;
+        ++r.failed;
+    }, report_);
 }
 
-Status Session::process_fd(int fd, int64_t offset, int64_t max_len) {
-    // S3: the fd is the caller's — never closed here, never re-opened by
-    // path. Range policy comes from the caller (offset/max_len); size
-    // policy (-m) and the verb follow the session's options.
-    if (fd < 0) {
-        fail(Failure::Kind::Open, EBADF, "", offset);
-        return Status::Skipped;
-    }
-    FileInfoRange range;
-    range.offset = offset;
-    range.max_len = max_len;
-    return run_verb_on_fd(fd, "", range);   // no path context: "" for records
-}
+// ---------------------------------------------------------------------------
 
-Session::Report Session::report() const {
-    Report r;
-    r.total_files = total_files_;
-    r.total_dirs = total_dirs_;
-    r.stats = stats_;
-    return r;
-}
+void Session::handle_file(const std::string& path, Report& r) {
+    ++r.total_files;   // discovered (before open) — includes empties and failures
 
-// ---- per-file pipeline -------------------------------------------------------
-
-Status Session::process_file(const std::string& path) {
-    // B1: the open/retry logic lives in FileHandle; the fd is owned by
-    // the handle and closed on every exit path below.
     auto opened = vmt::FileHandle::open(path);
     if (opened.is_error()) {
-        fail(opened.error().kind, opened.error().err, path);
-        return Status::Skipped;
+        ++r.failed;
+        if (opts_.collect_failures) {
+            Failure f = opened.error();
+            f.path = path;   // FileHandle carries the path already; belt and braces
+            r.failures.push_back(std::move(f));
+        }
+        return;
     }
 
-    return run_verb_on_fd(opened.value().fd(), path, range_);
+    FileInfoRange range;
+    range = opts_.range;
+    if (run_verb_on_fd(opened.value().fd(), path, range, r))
+        return;   // processed toward the goal
+
+    ++r.failed;
 }
 
-Status Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRange& range) {
-    // Shared verb dispatch + classification: used by process_file() (fd
-    // opened above) and process_fd() (caller-owned fd, S3).
-    //
-    // B2 classification of cache::* outcomes:
-    //   Error(Failure) -> the SAME record with the path attached, then
-    //                     Status::Skipped;
-    //   Ok(VerbOutcome)-> stats absorbed; region kept iff lock/lockall,
-    //                     else the session munmaps it here (MunmapFailed
-    //                     record with path context on failure);
-    //   FatalError     -> propagates (B4 converts at the public boundary).
-
+bool Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRange& range,
+                             Report& r) {
+    // Ok -> true (stats absorbed; Lock keeps the region).
+    // Failed -> false (Failure recorded, path attached here).
+    // Fatal -> throws (caught at the boundary).
     cache::Params params;
     params.range = range;
     params.max_file_size = opts_.max_file_size;
 
     const cache::Verb verb = verb_from_options(opts_);
 
-    vmt::Result<cache::VerbOutcome> r = [&] {
+    vmt::Result<cache::VerbOutcome> res = [&] {
         switch (verb) {
             case cache::Verb::Inspect: return cache::inspect(fd, params);
             case cache::Verb::Warm:    return cache::warm(fd, params);
@@ -130,27 +153,28 @@ Status Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRa
         throw FatalError("unreachable verb");
     }();
 
-    if (r.is_error()) {
-        // Attach the path (the verb is path-free) and record.
-        Failure f = r.error();
-        f.path = path;
-        fail(f.kind, f.err, f.path, f.offset);
-        return Status::Skipped;
+    if (res.is_error()) {
+        if (opts_.collect_failures) {
+            Failure f = res.error();
+            f.path = path;   // the verb is path-free; the session attaches
+            r.failures.push_back(std::move(f));
+        }
+        return false;
     }
 
-    // Ok: absorb the stats; keep or drop the region.
-    stats_.total_pages += r.value().stats.total_pages;
-    stats_.total_pages_in_core += r.value().stats.total_pages_in_core;
+    r.total_pages += res.value().stats.total_pages;
+    r.total_pages_in_core += res.value().stats.total_pages_in_core;
 
-    if (opts_.lock || opts_.lockall) {
-        kept_regions_.push_back(std::move(r.value().region));   // stays mapped
-    } else if (r.value().region) {
-        // The verb hands inspect/warm/evict mappings back; the session
-        // munmaps (path context available for the failure record).
+    if (opts_.verb == Options::Verb::Lock) {
+        kept_regions_.push_back(std::move(res.value().region));   // stays mapped
+    } else if (res.value().region) {
+        // Defensive: the engine munmaps inside inspect/warm/evict; only
+        // Lock returns a live region. If this ever fires, record it.
         int munmap_err = 0;
-        if (!r.value().region.unmap(munmap_err))
-            fail(Failure::Kind::MunmapFailed, munmap_err, path);
+        if (!res.value().region.unmap(munmap_err)) {
+            if (opts_.collect_failures)
+                r.failures.push_back(Failure{Failure::Kind::MunmapFailed, munmap_err, path, 0});
+        }
     }
-
-    return Status::Ok;
+    return true;
 }

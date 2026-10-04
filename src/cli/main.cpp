@@ -413,7 +413,9 @@ static std::unique_ptr<Session> g_session;
 // list file or stdin ("-") and processes each. This is input-driving, i.e. a
 // CLI concern: the library only ever sees process() per path. Deliberately
 // kept OUT of src/core (no fopen under core — success criterion).
-static void walk_batch(Session& session, const Options& o, std::function<void()> drain_failures) {
+// B4: batch paths accumulate into `extra` — the CLI makes ONE process()
+// call with all roots (argv + batch), preserving cross-root dedup.
+static void read_batch_paths(const Options& o, std::vector<std::string>& extra) {
   FILE* f;
   char* line = NULL;
   size_t len = 0;
@@ -433,8 +435,7 @@ static void walk_batch(Session& session, const Options& o, std::function<void()>
 
   while ((read = getdelim(&line, &len, delim, f)) != -1) {
     line[read - 1] = '\0';   // strip the delimiter
-    session.process(line);
-    drain_failures();
+    extra.emplace_back(line);
   }
 
   free(line);
@@ -577,57 +578,59 @@ static int run(int argc, char **argv) {
   }
 
   // Session created AFTER option parsing/validation so it holds the final
-  // Options; owns the ChartSink. Failures are recorded as structured data
-  // (A1); this formatter converts records to the historical text at print
-  // time — the exact wording the monolith emitted.
+  // Options (B4: verb/range/max_file_size/collect_failures + interim CLI
+  // flags). ONE process() call carries all roots (argv + batch): cross-root
+  // dedup + one Report.
+  o.range = f;
+  o.collect_failures = true;   // the CLI always drains records (quiet gates printing)
+  if (o.touch || o.lock || o.lockall) o.verb = Options::Verb::Warm;
+  if (o.evict) o.verb = Options::Verb::Evict;
+  if (o.lock) o.verb = Options::Verb::Lock;
+  if (o.lockall) o.verb = Options::Verb::Warm;   // ratified: -L -> Warm; CLI mlockalls after
   g_session = std::make_unique<Session>(o);
-  g_session->set_range(f);   // -p range applied to the session (used per file)
-  // A2: no more WarnFn parameter — failures are structured records, drained
-  // and formatted below (drain_failures). A3: the crawler is internal —
-  // the session drives traversal through process().
 
   // Must be done now because mlock() not inherited across fork()
   if (o.daemon) go_daemon(o);
 
   gettimeofday(&start_time, NULL);
 
-  // Print failures recorded since the last drain, converting records to the
-  // historical warning text. The quiet policy lives HERE (CLI): the library
-  // records everything regardless of -q.
-  size_t printed_failures = 0;
-  auto drain_failures = [&]() {
-    if (o.quiet) {
-      printed_failures = g_session->failures().size();
-      return;
-    }
-    const auto& fs = g_session->failures();
-    for (; printed_failures < fs.size(); ++printed_failures) {
-      const Failure& f = fs[printed_failures];
+  std::vector<std::string> roots;
+  if (o.batch) read_batch_paths(o, roots);
+  for (i=0; i<argc; i++) roots.emplace_back(argv[i]);
+
+  const Status st = g_session->process(roots);
+
+  gettimeofday(&end_time, NULL);
+
+  // Failures (including the Fatal record) come from the Report; the quiet
+  // policy gates PRINTING here in the CLI.
+  if (!o.quiet) {
+    for (const Failure& f : g_session->get_report().failures) {
+      if (f.kind == Failure::Kind::Fatal)
+        continue;   // rendered below as the FATAL line
       std::string msg = format_failure(f);
       if (!msg.empty())
         fprintf(stderr, "vmtouch: WARNING: %s\n", msg.c_str());
     }
-  };
-
-  auto run_one = [&](const char* path) {
-    g_session->process(path);
-    drain_failures();
-  };
-
-  if (o.batch) {
-      walk_batch(*g_session, o, drain_failures);
-      drain_failures();
   }
 
-  for (i=0; i<argc; i++) run_one(argv[i]);
-
-  gettimeofday(&end_time, NULL);
-
-  const Stats& s_stats = g_session->stats();   // session is the single source of truth now
-  int64_t total_pages_in_core_size = s_stats.total_pages_in_core * pagesize;
-  int64_t total_pages_size         = s_stats.total_pages * pagesize;
-  double  total_pages_in_core_perc = 100.0 * s_stats.total_pages_in_core / s_stats.total_pages;
+  const Session::Report& rep = g_session->get_report();
+  int64_t total_pages_in_core_size = rep.total_pages_in_core * pagesize;
+  int64_t total_pages_size         = rep.total_pages * pagesize;
+  double  total_pages_in_core_perc = 100.0 * rep.total_pages_in_core / rep.total_pages;
   double  elapsed                  = (end_time.tv_sec - start_time.tv_sec) + (double)(end_time.tv_usec - start_time.tv_usec)/1000000.0;
+
+  if (st == Status::Fatal) {
+    // The Fatal record IS the reason (always stored, never gated).
+    for (const Failure& f : rep.failures) {
+      if (f.kind == Failure::Kind::Fatal) {
+        fprintf(stderr, "vmtouch: FATAL: %s\n", f.path.c_str());
+        break;
+      }
+    }
+    send_exit_signal(o, 1);
+    return 1;
+  }
 
   if (o.lock || o.lockall) {
     if (o.lockall) {
@@ -640,7 +643,7 @@ static int run(int argc, char **argv) {
       write_pidfile(o);
     }
 
-    if (!o.quiet) printf("LOCKED %" PRId64 " pages (%s)\n", s_stats.total_pages, pretty_print_size(total_pages_size));
+    if (!o.quiet) printf("LOCKED %" PRId64 " pages (%s)\n", rep.total_pages, pretty_print_size(total_pages_size));
 
     if (o.wait) reopen_all();
 
@@ -649,21 +652,20 @@ static int run(int argc, char **argv) {
     exit(0);
   }
 
-  const Session::Report rep = g_session->report();   // A3: totals via report()
   if (!o.quiet) {
     if (o.output == NULL) {
       if (o.verbose) printf("\n");
       printf("           Files: %" PRId64 "\n", rep.total_files);
       printf("     Directories: %" PRId64 "\n", rep.total_dirs);
       if (o.touch)
-        printf("   Touched Pages: %" PRId64 " (%s)\n", s_stats.total_pages, pretty_print_size(total_pages_size));
+        printf("   Touched Pages: %" PRId64 " (%s)\n", rep.total_pages, pretty_print_size(total_pages_size));
       else if (o.evict)
-        printf("   Evicted Pages: %" PRId64 " (%s)\n", s_stats.total_pages, pretty_print_size(total_pages_size));
+        printf("   Evicted Pages: %" PRId64 " (%s)\n", rep.total_pages, pretty_print_size(total_pages_size));
       else {
-        printf("  Resident Pages: %" PRId64 "/%" PRId64 "  ", s_stats.total_pages_in_core, s_stats.total_pages);
+        printf("  Resident Pages: %" PRId64 "/%" PRId64 "  ", rep.total_pages_in_core, rep.total_pages);
         printf("%s/", pretty_print_size(total_pages_in_core_size));
         printf("%s  ", pretty_print_size(total_pages_size));
-        if (s_stats.total_pages)
+        if (rep.total_pages)
           printf("%.3g%%", total_pages_in_core_perc);
         printf("\n");
       }
@@ -673,7 +675,7 @@ static int run(int argc, char **argv) {
                    o.evict ? "Evicted" :
                              "Resident";
       printf("Files=%" PRId64 " Directories=%" PRId64 " %sPages=%" PRId64 " TotalPages=%" PRId64 " %sSize=%" PRId64 " TotalSize=%" PRId64 " %sPercent=%.3g Elapsed=%.5g\n", 
-       rep.total_files, rep.total_dirs, desc, s_stats.total_pages_in_core, s_stats.total_pages, desc, total_pages_in_core_size, total_pages_size, desc, total_pages_in_core_perc, elapsed);
+       rep.total_files, rep.total_dirs, desc, rep.total_pages_in_core, rep.total_pages, desc, total_pages_in_core_size, total_pages_size, desc, total_pages_in_core_perc, elapsed);
     }
   }
 

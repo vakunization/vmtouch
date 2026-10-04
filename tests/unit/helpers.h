@@ -96,39 +96,33 @@ struct WarningCapture {
 };
 
 // ---------------------------------------------------------------------------
-// EngineEventsRecorder: REMOVED in B2 (events removed with the sinks).
+// Session wiring (B4): Session(Options); tests build Options with the
+// library-level fields (verb/range/max_file_size/collect_failures).
 // ---------------------------------------------------------------------------
-
-// SharedSinkState: kept as an (unpopulated) type so existing call sites
-// compile through B2; B4/B6 remove it along with the old assertions.
 struct SharedSinkState {};
 
-// ---------------------------------------------------------------------------
-// Session wiring (B2): no sink parameter anymore — Session(Options).
-// make_session() is the one place that knows the current constructor
-// shape; the warn reference stays in the signature for test ergonomics
-// (failures are read via session->failures(), which is the same data).
-// ---------------------------------------------------------------------------
 inline std::unique_ptr<Session>
 make_session(std::shared_ptr<SharedSinkState>, WarningCapture& warn,
              const FileInfoRange& range = {}, bool quiet = false) {
     Options o;
-    o.quiet = quiet;
+    o.collect_failures = true;   // tests read failures via get_report()
+    o.range = range;
     auto s = std::make_unique<Session>(o);
-    s->set_range(range);
     return s;
 }
 
 inline std::unique_ptr<Session>
 make_session(std::shared_ptr<SharedSinkState>, WarningCapture& warn,
              const Options& opts, const FileInfoRange& range = {}) {
-    auto s = std::make_unique<Session>(opts);
-    s->set_range(range);
+    Options o = opts;
+    o.collect_failures = true;
+    if (range.offset || range.max_len) o.range = range;
+    auto s = std::make_unique<Session>(o);
     return s;
 }
 
 // Convenience: a fresh shared sink state as shared_ptr (kept for call-site
-// compatibility; the state is no longer populated — read session state).
+// compatibility; the state is no longer populated — read the Report).
 inline std::shared_ptr<SharedSinkState> make_shared_state() {
     return std::make_shared<SharedSinkState>();
 }

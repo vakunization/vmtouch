@@ -23,6 +23,13 @@ inline constexpr const char* VMTOUCH_VERSION = "1.3.1";
 // Set once at startup by the CLI (platform::init() in commit 3).
 extern long pagesize;
 
+// Per-file selection range (from -p). Was "struct FileInfo" in the monolith;
+// its `char* path` member was dead (never read or written) and is dropped.
+struct FileInfoRange {
+    int64_t offset = 0;
+    int64_t max_len = 0;
+};
+
 /*
  * To find out if the stat results from a single file correspond to a file we
  * have already seen, we need to compare both the device and the inode
@@ -33,6 +40,16 @@ struct dev_and_inode {
 };
 
 struct Options {
+    // B4 (spec2 §2.1): the library-level Options. One verb per call.
+    // CLI-level flags (quiet/verbose/output/daemon/pidfile/batch) stay in
+    // the CLI until B5 deletes them from this struct.
+    enum class Verb { Inspect, Warm, Evict, Lock };
+    Verb verb = Verb::Inspect;
+    FileInfoRange range{};               // {0,0} = whole file
+    size_t max_file_size = SIZE_MAX;
+    bool collect_failures = false;
+
+    // ---- B4 interim (deleted in B5): CLI-level state still riding along
     bool touch = 0;
     bool evict = 0;
     bool quiet = 0;
@@ -40,32 +57,22 @@ struct Options {
     bool lock = 0;
     bool lockall = 0;
     bool daemon = 0;
-    bool followsymlinks = 0;      // B3: inert (flags dropped per ratified spec)
-    bool singlefilesystem = 0;    // B3: inert
-    bool ignorehardlinkeduplictes = 0;   // spelling preserved from upstream; B3: inert
-    size_t max_file_size = SIZE_MAX;
+    bool followsymlinks = 0;      // inert (flags dropped per ratified spec)
+    bool singlefilesystem = 0;    // inert
+    bool ignorehardlinkeduplictes = 0;   // spelling preserved from upstream; inert
     bool wait = 0;
     const char* batch = nullptr;
     const char* pidfile = nullptr;
     const char* output = nullptr;
     int zero_delim = 0;
-
-    // B3: the filter lists are REMOVED from the library (ratified spec:
-    // fixed traversal policy). The CLI keeps accepting -i/-I until B5
-    // deletes the flags; the patterns are parsed and discarded.
-};
-
-// Per-file selection range (from -p). Was "struct FileInfo" in the monolith;
-// its `char* path` member was dead (never read or written) and is dropped.
-struct FileInfoRange {
-    int64_t offset = 0;
-    int64_t max_len = 0;
 };
 
 // Result codes returned by core entry points (cache/session).
 enum class Status : int32_t {
-    Ok = 0,        // file/directory processed
-    Skipped = 1,   // not processed; a warning was already emitted (or silence is correct)
+    Ok = 0,        // call completed; per-file problems are in the Report
+    Skipped = 1,   // process_fd only (B4): the file was skipped — see Report
+    Fatal = 2,     // traversal interrupted (FatalError caught at the boundary);
+                   // the Report holds everything accumulated + the Fatal record
 };
 
 // Fatal operation error: thrown where continuing is pointless (mlock
