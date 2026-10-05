@@ -231,14 +231,14 @@ vmt::Result<VerbOutcome> warm(int fd, const Params& p) {
     if (empty)
         return vmt::Result<VerbOutcome>::Ok(VerbOutcome{});
 
-    if (auto resident = mincore_count(m); resident.is_error())
-        return vmt::Result<VerbOutcome>::Error(resident.error());
-
     touch_pages(m);
 
+    // DEC-4(a): no mincore pass here — all pages are touched by definition,
+    // so residency equals the page count (the redundant mincore syscall and
+    // its discarded result are gone).
     VerbOutcome out;
     out.stats.total_pages = m.pages_in_range;
-    out.stats.total_pages_in_core = m.pages_in_range;   // all touched (spec2 §7.8)
+    out.stats.total_pages_in_core = m.pages_in_range;   // all touched (spec2 §7.8, as amended)
     int munmap_err = 0;
     if (!unmap_or_fail(m.region, munmap_err))
         return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::MunmapFailed, munmap_err, "", 0});
@@ -292,10 +292,9 @@ vmt::Result<VerbOutcome> lock(int fd, const Params& p) {
     if (empty)
         return vmt::Result<VerbOutcome>::Ok(VerbOutcome{});
 
-    if (auto resident = mincore_count(m); resident.is_error())
-        return vmt::Result<VerbOutcome>::Error(resident.error());
-
     touch_pages(m);   // -l implies touch
+
+    // DEC-4(a): no mincore pass — same rationale as warm.
 
     // DEV-1 adjudication (2026-10-05): the FATAL freeze is overturned.
     // mlock failure -> Failed{MlockFailed}; traversal continues. R2 makes

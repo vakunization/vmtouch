@@ -48,11 +48,9 @@ public:
     Crawler(const Crawler&) = delete;
     Crawler& operator=(const Crawler&) = delete;
 
-    // Traverses one root (file, directory, or symlink per the fixed
-    // policy), emitting items to the visitor. Takes the root BY VALUE:
-    // the parameter is this frame's private mutable copy — used to strip
-    // the trailing '/' exactly like the C original mutated its buffer.
-    // Recursion passes child copies the same way.
+    // Takes the root BY VALUE; recursion passes child copies. walk_impl
+    // mutates the string IN PLACE (DEC-6(a): documented at the signature)
+    // to strip the trailing '/' exactly like the C original did.
     void walk(std::string path, const CrawlVisitor& visitor);
 
     // Directories ENTERED so far (incremented before opendir; a failed
@@ -65,10 +63,9 @@ private:
         int curr_crawl_depth = 0;
         ino_t crawl_inodes[1024];      // MAX_CRAWL_DEPTH, verbatim for now
         void* seen_inodes = nullptr;   // tsearch tree until modernization
-        dev_t orig_device = 0;
-        int orig_device_inited = 0;
     };
 
+    // Mutates `path` in place (trailing-slash strip) — by design, see walk().
     void walk_impl(std::string& path, const CrawlVisitor& visitor);
 
     State state_;

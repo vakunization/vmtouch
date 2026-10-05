@@ -75,9 +75,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #include "cli_options.h"
 #include "core/common.h"
 #include "core/platform.h"
-#include "core/cache.h"
 #include "core/session.h"
-#include "core/crawl.h"
 
 
 

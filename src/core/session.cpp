@@ -71,7 +71,7 @@ Status Session::process(std::span<const std::string> paths) {
                     r.failures.push_back(*item.error);
                 return;
             }
-            handle_file(std::string(item.path), r);
+            handle_file(item.path, r);   // NIT-4: no temporary std::string
         };
 
         for (const auto& root : paths)
@@ -92,11 +92,7 @@ Status Session::process_fd(int fd, int64_t offset, int64_t max_len) {
             return;
         }
 
-        FileInfoRange range;
-        range.offset = offset;
-        range.max_len = max_len;
-
-        if (run_verb_on_fd(fd, "", range, r))
+        if (run_verb_on_fd(fd, "", FileInfoRange{offset, max_len}, r))
             return;   // Ok (or silent skip)
 
         ++r.failed;
@@ -105,10 +101,10 @@ Status Session::process_fd(int fd, int64_t offset, int64_t max_len) {
 
 // ---------------------------------------------------------------------------
 
-void Session::handle_file(const std::string& path, Report& r) {
+void Session::handle_file(std::string_view path, Report& r) {
     ++r.total_files;   // discovered (before open) — includes empties and failures
 
-    auto opened = vmt::FileHandle::open(path);
+    auto opened = vmt::FileHandle::open(std::string(path));   // the one copy
     if (opened.is_error()) {
         ++r.failed;
         if (opts_.collect_failures) {
@@ -119,9 +115,7 @@ void Session::handle_file(const std::string& path, Report& r) {
         return;
     }
 
-    FileInfoRange range;
-    range = opts_.range;
-    if (run_verb_on_fd(opened.value().fd(), path, range, r))
+    if (run_verb_on_fd(opened.value().fd(), std::string(path), opts_.range, r))
         return;   // processed toward the goal
 
     ++r.failed;

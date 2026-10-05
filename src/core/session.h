@@ -76,10 +76,13 @@ public:
 
 private:
     // One discovered file: open -> dispatch -> classify (visitor body).
-    void handle_file(const std::string& path, Report& r);
+    // NIT-4: takes string_view — the visitor's path needs no extra copy
+    // (FileHandle::open materializes the one string it needs).
+    void handle_file(std::string_view path, Report& r);
 
     // Verb dispatch + classification for an already-open fd. Does NOT
-    // close the fd. Returns the Failure on Failed; throws FatalError.
+    // close the fd. Returns the Failure on Failed; throws FatalError only
+    // for infrastructural causes (R2).
     bool run_verb_on_fd(int fd, const std::string& path, const FileInfoRange& range,
                         Report& r);
 
