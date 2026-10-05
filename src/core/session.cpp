@@ -31,7 +31,7 @@ Session::~Session() = default;
 
 // ---------------------------------------------------------------------------
 
-Status Session::catch_fatal_and_run(const std::function<void(Report&)>& body, Report& r) noexcept {
+Status Session::catch_fatal_and_run(const std::function<void(Report&)>& body, Report& r) {
     const auto start = std::chrono::steady_clock::now();
     try {
         body(r);
@@ -51,9 +51,11 @@ Status Session::catch_fatal_and_run(const std::function<void(Report&)>& body, Re
         r.elapsed_seconds = wall_seconds_since(start);
         return Status::Fatal;
     }
+    // NIT-3 (2026-10-05): no catch-all — bad_alloc propagates (A-phase
+    // ruling restored over the B4 noexcept boundary).
 }
 
-Status Session::process(std::span<const std::string> paths) noexcept {
+Status Session::process(std::span<const std::string> paths) {
     report_ = Report{};   // ONE call — ONE Report (reset at entry)
 
     return catch_fatal_and_run([&](Report& r) {
@@ -79,7 +81,7 @@ Status Session::process(std::span<const std::string> paths) noexcept {
     }, report_);
 }
 
-Status Session::process_fd(int fd, int64_t offset, int64_t max_len) noexcept {
+Status Session::process_fd(int fd, int64_t offset, int64_t max_len) {
     report_ = Report{};   // same Report semantics as process() (owner amendment)
 
     return catch_fatal_and_run([&](Report& r) {

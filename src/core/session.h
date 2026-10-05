@@ -6,9 +6,12 @@
 //   Status process_fd(int fd, int64_t offset, int64_t max_len)
 //   const Report& get_report() const
 //
-// Contract (owner rulings folded in):
-//   * process() NEVER throws: FatalError is caught at the boundary and
-//     converted to Status::Fatal + a Failure{Kind::Fatal} record;
+// Contract (owner rulings folded in; NIT-3 adjudication 2026-10-05):
+//   * process()/process_fd() are NOT noexcept: FatalError is caught at the
+//     internal boundary and converted to Status::Fatal + a Failure{Kind::Fatal}
+//     record; any other exception (bad_alloc) propagates to the caller per
+//     the A-phase "bad_alloc propagates" ruling (restored over the B4
+//     noexcept boundary);
 //   * process_fd() behaves EXACTLY like process() (same Report semantics,
 //     same fatal handling) — only the input differs: the caller's fd is
 //     neither opened nor closed by the library;
@@ -60,12 +63,12 @@ public:
     Session& operator=(const Session&) = delete;
 
     // Traverses and processes all roots; order preserved. An empty list is
-    // valid (zeroed Report). Never throws (noexcept below in the .cpp via
-    // the wrapper; declared here for clarity).
-    Status process(std::span<const std::string> paths) noexcept;
+    // valid (zeroed Report). Does not throw FatalError (converted to
+    // Status::Fatal internally); bad_alloc propagates (NIT-3, 2026-10-05).
+    Status process(std::span<const std::string> paths);
 
-    // S3: caller-owned fd; same Report semantics as process(). Never throws.
-    Status process_fd(int fd, int64_t offset, int64_t max_len) noexcept;
+    // S3: caller-owned fd; same Report semantics as process().
+    Status process_fd(int fd, int64_t offset, int64_t max_len);
 
     // The Report of the LAST process()/process_fd() call. Valid until the
     // next call or destruction. Before any call: a zeroed Report.
@@ -81,7 +84,8 @@ private:
                         Report& r);
 
     // The boundary wrapper: catches FatalError -> Status::Fatal + record.
-    Status catch_fatal_and_run(const std::function<void(Report&)>& body, Report& r) noexcept;
+    // bad_alloc propagates (NIT-3, 2026-10-05).
+    Status catch_fatal_and_run(const std::function<void(Report&)>& body, Report& r);
 
     Options opts_;
     Report report_;                                  // last call's Report
