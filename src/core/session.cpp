@@ -171,16 +171,7 @@ bool Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRang
     r.total_pages += res.value().stats.total_pages;
     r.total_pages_in_core += res.value().stats.total_pages_in_core;
 
-    if (opts_.verb == Options::Verb::Lock) {
+    if (opts_.verb == Options::Verb::Lock)
         kept_regions_.push_back(std::move(res.value().region));   // stays mapped
-    } else if (res.value().region) {
-        // Defensive: the engine munmaps inside inspect/warm/evict; only
-        // Lock returns a live region. If this ever fires, record it.
-        int munmap_err = 0;
-        if (!res.value().region.unmap(munmap_err)) {
-            if (opts_.collect_failures)
-                r.failures.push_back(Failure{Failure::Kind::MunmapFailed, munmap_err, path, 0});
-        }
-    }
     return true;
 }
