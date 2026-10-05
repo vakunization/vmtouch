@@ -277,9 +277,14 @@ fi
 out=$("$VMFILE" -v -p "100M-200M" "$T/ten" 2>&1); rc_is $? 0 "-p beyond EOF exits 0"
 has "$out" "smaller than offset" "-p beyond EOF warns"
 
-# --- the fatal path (Kind::Fatal -> FATAL line + exit 1) -----------------------
+# --- mlock failure = per-file warning (DEV-1, 2026-10-05) ---------------------
 
-# lock a file far above the memlock rlimit: mlock fails non-retryably (ENOMEM).
+# lock a file far above the memlock rlimit: mlock fails non-retryably (ENOMEM)
+# -> Failed{MlockFailed} -> "vmtouch: WARNING: mlock: PATH (ENOMEM)". Owner
+# ruling (2026-10-05): upstream semantics KEPT — a -l run still ends in the
+# blocking select() ("stay resident") even when some files failed, so the
+# exit code cannot be asserted; timeout kills the run and asserts only the
+# rendered text (no FATAL line anymore).
 # NOTE: the sanitizer build's ASan mlock interceptor succeeds where the real
 # syscall fails (documented since A1) — run this against a non-sanitizer
 # binary: VMFILE_PLAIN env, a sibling build-plain/, or $VMFILE itself when it
@@ -298,14 +303,15 @@ if [ "$(id -u)" != 0 ]; then
   if [ -n "$VMF" ]; then
     mk "$T/lockme" 25600   # 100 MB
     out=$(timeout 10 bash -c "ulimit -l 8; '$VMF' -l '$T/lockme'" 2>&1); rc=$?
-    rc_is "$rc" 1 "mlock failure exits 1"
-    has "$out" "vmtouch: FATAL: mlock" "mlock failure renders the FATAL line"
+    has "$out" "vmtouch: WARNING: mlock: " "mlock failure renders the upstream warning text"
+    lacks "$out" "FATAL" "no FATAL line on mlock failure"
+    rc_is "$rc" 124 "-l run blocks in select() as upstream (timeout kill)"
     rm -f "$T/lockme"
   else
-    echo "  skip mlock-fatal test (no non-sanitizer binary; set VMFILE_PLAIN)"
+    echo "  skip mlock-warning test (no non-sanitizer binary; set VMFILE_PLAIN)"
   fi
 else
-  echo "  skip mlock-fatal test (running as root)"
+  echo "  skip mlock-warning test (running as root)"
 fi
 
 echo

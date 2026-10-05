@@ -108,6 +108,8 @@ struct Failure {
         // mincore FATAL freeze was overturned — these failures become
         // per-file Failed records. New values only; 1-20 keep their
         // numbers (Phase-3 C enum maps 1:1).
+        MlockFailed = 21,     // mlock failed (upstream text: mlock: PATH (ERR);
+                              // R2: Failed in every case, retry_op never throws)
         MincoreFailed = 22,   // mincore failed (BUG-1 fix: retry_op result is
                               // checked; R2 makes retryable-after-N Failed too)
     };

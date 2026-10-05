@@ -157,15 +157,15 @@ TEST(cache_evict_reports_advisory_failure_kind) {
 }
 
 // scenario: S3 (mlock model loader) — "tell me WHY mlock failed". Frozen
-// split (owner ruling): non-retryable AND retryable-after-N mlock failures
-// are FATAL — the verb throws FatalError carrying the errno text (path is
-// added by the caller).
+// split (owner ruling, OVERTURNED 2026-10-05): non-retryable AND
+// retryable-after-N mlock failures are now a per-file Failed record —
+// Failed{MlockFailed, errno}, traversal continues (bugs.md DEV-1).
 //
 // NOTE: skipped under ASan/UBSan — ASan intercepts mlock(2) and its
 // interceptor succeeds where the real syscall would fail with ENOMEM, so
 // the failure path cannot be exercised in a sanitizer build (verified by
 // raw-syscall comparison). The no-sanitizer CI run covers this test.
-TEST(cache_lock_failure_throws_fatal_error) {
+TEST(cache_lock_failure_is_failed_record) {
 #ifdef __SANITIZE_ADDRESS__
     std::printf("  skip lock-failure test (ASan intercepts mlock)\n");
     return;
@@ -183,14 +183,11 @@ TEST(cache_lock_failure_throws_fatal_error) {
         return;
     }
     unit::TempFile f(npages);
-    bool threw = false;
-    try {
-        (void)cache::lock(f.fd, Params{});
-    } catch (const FatalError& e) {
-        threw = true;
-        EXPECT_TRUE(std::string(e.what()).find("mlock") != std::string::npos);
-    }
-    EXPECT_TRUE(threw);
+    auto r = cache::lock(f.fd, Params{});
+    EXPECT_TRUE(r.is_error());                                  // Failed, not fatal
+    EXPECT_EQ((int)r.error().kind, (int)Failure::Kind::MlockFailed);
+    EXPECT_TRUE(r.error().path.empty());                        // verbs are path-free
+    EXPECT_TRUE(r.error().err != 0);                            // errno carried (ENOMEM)
 }
 
 TEST(cache_lock_success_returns_live_region) {

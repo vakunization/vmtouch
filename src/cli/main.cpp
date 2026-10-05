@@ -189,6 +189,11 @@ static std::string format_failure(const Failure& f) {
       return "unable to posix_fadvise file " + f.path + " (" + strerror(f.err) + ")";
     case Failure::Kind::EvictInvalidateFailed:
       return "unable to msync invalidate file " + f.path + " (" + strerror(f.err) + ")";
+    case Failure::Kind::MlockFailed:
+      // New kind (2026-10-05 adjudication): rendered with the upstream
+      // monolith's text (vmtouch.c: fatal("mlock: %s (%s)", path, ...)),
+      // now a per-file warning instead of a traversal-stopping fatal.
+      return "mlock: " + f.path + " (" + strerror(f.err) + ")";
     case Failure::Kind::MincoreFailed:
       // New kind (2026-10-05 adjudication): mincore failures were always
       // fatal before, so there is no upstream text to reproduce.

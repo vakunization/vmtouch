@@ -278,15 +278,15 @@ vmt::Result<VerbOutcome> lock(int fd, const Params& p) {
 
     touch_pages(m);   // -l implies touch
 
-    // FROZEN split: non-retryable mlock failure is FATAL (spec superseded
-    // by the owner's ruling), retryable-after-N also fatal.
+    // DEV-1 adjudication (2026-10-05): the FATAL freeze is overturned.
+    // mlock failure -> Failed{MlockFailed}; traversal continues. Under R2
+    // the retryable-after-N path (currently a throw inside retry_op)
+    // becomes Failed too — unified in the retry_op commit.
     int err = 0;
-    const bool ok = retry_op("mlock", [&] {
-        return mlock(m.region.mem(), m.len_of_range);
-    }, err);
-    if (!ok) {
-        throw FatalError(std::string("mlock (") + strerror(err) + ")");
-    }
+    if (!retry_op("mlock", [&] {
+            return mlock(m.region.mem(), m.len_of_range);
+        }, err))
+        return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::MlockFailed, err, "", 0});
 
     // NO munmap: the region is handed to the caller (spec2 §7.10).
     VerbOutcome out;
