@@ -185,10 +185,13 @@ void touch_pages(const Mapping& m) {
     static_cast<void>(touched);
 }
 
-// munmap inside the verb for inspect/warm/evict (spec2 §7.12). R2: failure
-// after retry is a per-file Failed{MunmapFailed}, not a fatal; the (still
-// live) region is then released by MappedRegion's destructor — no leak.
-// (The retry-driving-unmap redesign itself lands in the MISS-1 commit.)
+// munmap inside the verb for inspect/warm/evict (spec2 §7.12). MISS-1 fix
+// (unmap option (a), 2026-10-05): unmap() clears the handle only on
+// success, so the retry below genuinely re-attempts munmap (previously the
+// first failure cleared the handle and every "retry" trivially succeeded).
+// R2: failure after retry is a per-file Failed{MunmapFailed}, not a fatal;
+// the (still live) region is then released by MappedRegion's destructor —
+// no leak, no double-unmap.
 bool unmap_or_fail(MappedRegion& region, int& err) {
     return retry_op("munmap", [&] { return region.unmap(err) ? 0 : -1; }, err);
 }

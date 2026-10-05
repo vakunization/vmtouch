@@ -83,16 +83,22 @@ public:
     int64_t len() const { return len_; }
     explicit operator bool() const { return mem_ != nullptr; }
 
-    // Explicit early munmap (idempotent). Returns false + errno on failure
-    // (region still cleared — the destructor will not retry).
+    // Explicit early munmap (MISS-1 / unmap option (a), 2026-10-05):
+    // the handle is cleared ONLY on success — on failure the region stays
+    // live so a subsequent unmap() genuinely re-attempts munmap (the retry
+    // in unmap_or_fail works), and the destructor makes a final attempt.
+    // Idempotent after success: a second call is a no-op returning true.
     bool unmap(int& err) {
         if (!mem_)
             return true;
-        const bool ok = munmap(mem_, len_) == 0;
-        err = ok ? 0 : errno;
+        if (munmap(mem_, len_) != 0) {
+            err = errno;
+            return false;   // region intentionally NOT cleared on failure
+        }
+        err = 0;
         mem_ = nullptr;
         len_ = 0;
-        return ok;
+        return true;
     }
 
 private:

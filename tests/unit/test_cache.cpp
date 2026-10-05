@@ -202,3 +202,35 @@ TEST(cache_lock_success_returns_live_region) {
     int err = 0;
     EXPECT_TRUE(r.value().region.unmap(err));
 }
+
+TEST(cache_unmap_keeps_region_live_on_failure) {
+    // MISS-1 regression (unmap option (a), 2026-10-05): a FAILED unmap must
+    // NOT clear the handle — the region stays live so a retry genuinely
+    // re-attempts munmap and the destructor still owns the mapping.
+    // Deterministic munmap failure: an unaligned address is EINVAL per
+    // munmap(2). MappedRegion is constructed directly (it is the test's
+    // prerogative) with a misaligned pointer.
+    unit::TempFile f(1);
+    void* m = mmap(nullptr, f.size + pagesize, PROT_READ, MAP_SHARED, f.fd, 0);
+    EXPECT_TRUE(m != MAP_FAILED);
+    void* misaligned = static_cast<char*>(m) + 1;
+    cache::MappedRegion region(misaligned, f.size);
+
+    int err = 0;
+    EXPECT_FALSE(region.unmap(err));            // munmap: EINVAL
+    EXPECT_EQ(err, EINVAL);
+    EXPECT_TRUE(static_cast<bool>(region));     // handle NOT cleared (the fix)
+    EXPECT_TRUE(region.mem() == misaligned);    // address still owned
+
+    // A second unmap() genuinely re-attempts (same EINVAL) — under the old
+    // semantics it would have been a trivial "success" on a cleared handle.
+    err = 0;
+    EXPECT_FALSE(region.unmap(err));
+    EXPECT_EQ(err, EINVAL);
+    EXPECT_TRUE(static_cast<bool>(region));
+
+    // Release the underlying mapping directly; the destructor's final munmap
+    // on the (misaligned, already-dead) address is then harmless on Linux.
+    EXPECT_TRUE(munmap(m, f.size + pagesize) == 0);
+    region = cache::MappedRegion{};
+}
