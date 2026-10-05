@@ -104,6 +104,12 @@ struct Failure {
         EvictInvalidateFailed = 19, // unable to msync invalidate file PATH (ERR)
         Fatal = 20,           // TERMINAL: traversal stopped (mlock/mincore fatal,
                               // depth, allocation, platform). err/path describe the site.
+        // --- 2026-10-05 adjudication (bugs.md DEV-1/DEV-2): the mlock/
+        // mincore FATAL freeze was overturned — these failures become
+        // per-file Failed records. New values only; 1-20 keep their
+        // numbers (Phase-3 C enum maps 1:1).
+        MincoreFailed = 22,   // mincore failed (BUG-1 fix: retry_op result is
+                              // checked; R2 makes retryable-after-N Failed too)
     };
     Kind        kind;
     int32_t     err = 0;    // errno, 0 if not applicable

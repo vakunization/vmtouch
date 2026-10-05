@@ -189,6 +189,10 @@ static std::string format_failure(const Failure& f) {
       return "unable to posix_fadvise file " + f.path + " (" + strerror(f.err) + ")";
     case Failure::Kind::EvictInvalidateFailed:
       return "unable to msync invalidate file " + f.path + " (" + strerror(f.err) + ")";
+    case Failure::Kind::MincoreFailed:
+      // New kind (2026-10-05 adjudication): mincore failures were always
+      // fatal before, so there is no upstream text to reproduce.
+      return "unable to mincore file " + f.path + " (" + strerror(f.err) + ")";
     case Failure::Kind::Fatal:
       // Terminal record (B2): rendered as the historical FATAL text. The
       // fatal sites are few and known (mlock/mincore/misaligned-mmap/

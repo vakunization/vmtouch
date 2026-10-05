@@ -142,19 +142,22 @@ vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok)
     return vmt::Result<void>::Ok();
 }
 
-// mincore pass: counts residency (no events — the sink layer is gone).
-// FROZEN split: mincore failure is FATAL in every case (non-retryable and
-// retryable-after-N alike) — mincore failure means residency data cannot
-// be trusted for this mapping at all.
+// mincore pass: counts residency. BUG-1 fix (2026-10-05): the retry_op
+// result IS checked — on failure (non-retryable AND retryable-after-N per
+// the R2 adjudication) the verb returns Failed{MincoreFailed} instead of
+// counting residency from an uninitialized array. FatalError is gone from
+// this path entirely (DEV-2 adjudication). Scope: inspect only — DEC-4(a)
+// removed the mincore call from warm/lock (landing in the cleanup commit).
 vmt::Result<int64_t> mincore_count(const Mapping& m) {
     auto* mincore_array = static_cast<unsigned char*>(malloc(m.pages_in_range));
     if (mincore_array == NULL)
         throw FatalError(std::string("Failed to allocate memory for mincore array (") + strerror(errno) + ")");
 
     int err = 0;
-    retry_op("mincore", [&] {
-        return mincore(m.region.mem(), m.len_of_range, mincore_array);
-    }, err);   // both branches throw (see retry_op + the note above)
+    if (!retry_op("mincore", [&] {
+            return mincore(m.region.mem(), m.len_of_range, mincore_array);
+        }, err))
+        return vmt::Result<int64_t>::Error(Failure{Failure::Kind::MincoreFailed, err, "", 0});
 
     int64_t pages_resident = 0;
     for (int64_t i = 0; i < m.pages_in_range; i++) {
