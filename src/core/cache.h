@@ -3,13 +3,17 @@
 // Four free functions over an already-open fd; the ONLY place where
 // page-cache syscalls live. No path, no sinks, no CLI concepts.
 //
-// Return contract (one error language):
+// Return contract (one error language; R2 + DEV-1/DEV-2 adjudications,
+// 2026-10-05):
 //   * Ok   -> Result::Ok(VerbOutcome) — stats always; region ONLY for lock
 //             (inspect/warm/evict munmap inside themselves before return);
-//   * Fail -> Result::Error(Failure) — kind from §8.1, err = errno, path
-//             EMPTY (the caller attaches the path);
-//   * Fatal-> throw FatalError — non-retryable mlock/mincore, retryable-
-//             after-N (3×50ms, EINTR/EAGAIN/EBUSY), allocation failure,
+//   * Fail -> Result::Error(Failure) — kind from §8.1 (as amended: Kind 21
+//             MlockFailed, Kind 22 MincoreFailed), err = the syscall's error
+//             code, path EMPTY (the caller attaches the path). ANY syscall
+//             failure is a per-file Failed — non-retryable AND
+//             retryable-after-N (3×50ms, EINTR/EAGAIN/EBUSY) alike;
+//             traversal continues;
+//   * Fatal-> throw FatalError — infrastructure only: allocation failure,
 //             misaligned mmap, unsupported platform. Traversal stops.
 //
 // Empty file: silent Ok with zero stats and no region (no record).

@@ -48,26 +48,27 @@ int64_t bytes2pages(int64_t bytes) {
 }
 
 // Runs one syscall with the retry policy. `call` returns 0 on success,
-// -1 on failure with errno set. Outcomes:
-//   ok              -> true
-//   non-retryable   -> false, out_err = errno
-//   retryable after N attempts -> throws FatalError (message supplied)
+// nonzero on failure; out_err receives the error code (errno, or the
+// call's own return value for errno-less calls like posix_fadvise —
+// MISS-2). R2 adjudication (2026-10-05): retryable-after-N is a per-file
+// Failed, NOT a fatal — this helper NEVER throws. cache::* throws
+// FatalError only for infrastructural causes (allocation, misaligned
+// mmap, unsupported platform).
 template <typename Call>
-bool retry_op(const char* fatal_what, Call&& call, int& out_err) {
+bool retry_op(const char* /*fatal_what*/, Call&& call, int& out_err) {
     int err = 0;
     for (int attempt = 0; attempt < kRetryAttempts; ++attempt) {
+        errno = 0;   // each attempt classifies its own errno (MISS-2)
         if (call() == 0) {
             out_err = 0;
             return true;
         }
-        err = errno;
+        err = errno;   // errno-less calls must return their code via errno
         if (!is_retryable(err))
             break;
         if (attempt + 1 < kRetryAttempts)
             std::this_thread::sleep_for(std::chrono::milliseconds(kRetrySleepMs));
     }
-    if (is_retryable(err))
-        throw FatalError(std::string(fatal_what) + " (" + strerror(err) + ")");
     out_err = err;
     return false;
 }
@@ -88,16 +89,17 @@ struct Mapping {
 // Returns Ok (mapping established, m filled) or Error.
 vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok) {
     skipped_ok = false;
+    int err = 0;
 
     struct stat sb;
-    if (fstat(fd, &sb))
-        return vmt::Result<void>::Error(Failure{Failure::Kind::FstatFailed, errno, "", 0});
+    if (!retry_op("fstat", [&] { return fstat(fd, &sb); }, err))
+        return vmt::Result<void>::Error(Failure{Failure::Kind::FstatFailed, err, "", 0});
     m.st = sb;
 
     if (S_ISBLK(sb.st_mode)) {
 #if defined(__linux__)
-        if (ioctl(fd, BLKGETSIZE64, &m.len_of_file))
-            return vmt::Result<void>::Error(Failure{Failure::Kind::IoctlSizeFailed, errno, "", 0});
+        if (!retry_op("ioctl", [&] { return ioctl(fd, BLKGETSIZE64, &m.len_of_file); }, err))
+            return vmt::Result<void>::Error(Failure{Failure::Kind::IoctlSizeFailed, err, "", 0});
 #else
         throw FatalError("discovering size of block devices not (yet?) supported on this platform");
 #endif
@@ -125,12 +127,15 @@ vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok)
 
     // ---- map --------------------------------------------------------------
 
-    void* mem = mmap(NULL, m.len_of_range, PROT_READ, MAP_SHARED, fd, p.range.offset);
-    if (mem == MAP_FAILED) {
-        if (is_retryable(errno))
-            throw FatalError(std::string("mmap (") + strerror(errno) + ")");
-        return vmt::Result<void>::Error(Failure{Failure::Kind::Map, errno, "", 0});
-    }
+    // DEV-3 (R2): mmap goes through retry_op like every other syscall.
+    // Non-retryable AND retryable-after-N -> Failed{Map}; no throw.
+    void* mem = MAP_FAILED;
+    int map_err = 0;
+    if (!retry_op("mmap", [&] {
+            mem = mmap(NULL, m.len_of_range, PROT_READ, MAP_SHARED, fd, p.range.offset);
+            return mem == MAP_FAILED ? -1 : 0;
+        }, map_err))
+        return vmt::Result<void>::Error(Failure{Failure::Kind::Map, map_err, "", 0});
 
     if (!platform::aligned_p(mem)) {   // infrastructure: fatal (spec2 §8.3)
         munmap(mem, m.len_of_range);
@@ -180,13 +185,12 @@ void touch_pages(const Mapping& m) {
     static_cast<void>(touched);
 }
 
-// munmap inside the verb for inspect/warm/evict (spec2 §7.12): failure
-// after retry is FATAL — otherwise the mapping would leak unnoticed.
-void unmap_or_fatal(MappedRegion& region) {
-    int err = 0;
-    const bool ok = retry_op("munmap", [&] { return region.unmap(err) ? 0 : -1; }, err);
-    if (!ok)
-        throw FatalError(std::string("unable to munmap file (") + strerror(err) + ")");
+// munmap inside the verb for inspect/warm/evict (spec2 §7.12). R2: failure
+// after retry is a per-file Failed{MunmapFailed}, not a fatal; the (still
+// live) region is then released by MappedRegion's destructor — no leak.
+// (The retry-driving-unmap redesign itself lands in the MISS-1 commit.)
+bool unmap_or_fail(MappedRegion& region, int& err) {
+    return retry_op("munmap", [&] { return region.unmap(err) ? 0 : -1; }, err);
 }
 
 } // namespace
@@ -210,7 +214,9 @@ vmt::Result<VerbOutcome> inspect(int fd, const Params& p) {
     VerbOutcome out;
     out.stats.total_pages = m.pages_in_range;
     out.stats.total_pages_in_core = resident.value();
-    unmap_or_fatal(m.region);
+    int munmap_err = 0;
+    if (!unmap_or_fail(m.region, munmap_err))
+        return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::MunmapFailed, munmap_err, "", 0});
     return vmt::Result<VerbOutcome>::Ok(std::move(out));
 }
 
@@ -230,7 +236,9 @@ vmt::Result<VerbOutcome> warm(int fd, const Params& p) {
     VerbOutcome out;
     out.stats.total_pages = m.pages_in_range;
     out.stats.total_pages_in_core = m.pages_in_range;   // all touched (spec2 §7.8)
-    unmap_or_fatal(m.region);
+    int munmap_err = 0;
+    if (!unmap_or_fail(m.region, munmap_err))
+        return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::MunmapFailed, munmap_err, "", 0});
     return vmt::Result<VerbOutcome>::Ok(std::move(out));
 }
 
@@ -244,13 +252,19 @@ vmt::Result<VerbOutcome> evict(int fd, const Params& p) {
 
     int err = 0;
 #if defined(__linux__) || defined(__hpux)
-    const bool ok = retry_op("unable to posix_fadvise file", [&] {
-        return posix_fadvise(fd, p.range.offset, m.len_of_range, POSIX_FADV_DONTNEED);
+    // MISS-2: posix_fadvise RETURNS the error code and does not set errno.
+    // The lambda routes its return value through errno (zeroed by retry_op
+    // before each attempt) so classification and Failure.err are correct.
+    const bool ok = retry_op("posix_fadvise", [&] {
+        const int rc = posix_fadvise(fd, p.range.offset, m.len_of_range, POSIX_FADV_DONTNEED);
+        if (rc != 0)
+            errno = rc;
+        return rc;
     }, err);
     if (!ok)
         return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::EvictAdviseFailed, err, "", 0});
 #elif defined(__FreeBSD__) || defined(__sun__) || defined(__APPLE__)
-    const bool ok = retry_op("unable to msync invalidate file", [&] {
+    const bool ok = retry_op("msync", [&] {
         return msync(m.region.mem(), m.len_of_range, MS_INVALIDATE);
     }, err);
     if (!ok)
@@ -261,7 +275,9 @@ vmt::Result<VerbOutcome> evict(int fd, const Params& p) {
 
     VerbOutcome out;
     out.stats.total_pages = m.pages_in_range;
-    unmap_or_fatal(m.region);
+    int munmap_err = 0;
+    if (!unmap_or_fail(m.region, munmap_err))
+        return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::MunmapFailed, munmap_err, "", 0});
     return vmt::Result<VerbOutcome>::Ok(std::move(out));
 }
 
@@ -279,9 +295,9 @@ vmt::Result<VerbOutcome> lock(int fd, const Params& p) {
     touch_pages(m);   // -l implies touch
 
     // DEV-1 adjudication (2026-10-05): the FATAL freeze is overturned.
-    // mlock failure -> Failed{MlockFailed}; traversal continues. Under R2
-    // the retryable-after-N path (currently a throw inside retry_op)
-    // becomes Failed too — unified in the retry_op commit.
+    // mlock failure -> Failed{MlockFailed}; traversal continues. R2 makes
+    // this true for the retryable-after-N path as well (retry_op no longer
+    // throws).
     int err = 0;
     if (!retry_op("mlock", [&] {
             return mlock(m.region.mem(), m.len_of_range);
