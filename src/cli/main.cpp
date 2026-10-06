@@ -110,7 +110,7 @@ void usage() {
 
 // Fatal situations do not exit() here: the code throws FatalError and
 // main()'s single handler prints the message and exits 1.
-static void fatal(std::string_view msg) {
+[[noreturn]] static void fatal(std::string_view msg) {
   throw FatalError(std::string(msg));
 }
 
@@ -307,13 +307,6 @@ void parse_range(std::string_view inp, FileInfoRange& f) {
 }
 
 
-// -i/-I filters are gone; these stubs remain only to keep the getopt
-// switch shape simple.
-void parse_ignore_item(const char * /*inp*/, Options& /*o*/) {}
-void parse_filename_filter_item(const char * /*inp*/, Options& /*o*/) {}
-
-
-
 
 #ifdef __linux__
 // (can_do_mincore lives in core/platform.cpp.)
@@ -329,40 +322,35 @@ static std::unique_ptr<Session> g_session;
 // list file or stdin ("-") and accumulates them into `extra`. Input-
 // driving is a CLI concern: the library only ever sees process() per path.
 static void read_batch_paths(const CliOptions& o, std::vector<std::string>& extra) {
-  FILE* f;
-  char* line = NULL;
-  size_t len = 0;
-  ssize_t read;
-  int delim = o.zero_delim ? '\0' : '\n';
+  const int delim = o.zero_delim ? '\0' : '\n';
 
-  if (!strcmp(o.batch, "-")) {
-    f = stdin;
-  } else {
-    f = fopen(o.batch, "r");
-    if (!f) {
+  std::ifstream file;
+  std::istream* f = &std::cin;
+  if (o.batch != "-") {
+    file.open(std::string(o.batch));
+    if (!file) {
       warning(false, std::format("unable to open {} ({})", o.batch, strerror(errno)));
       return;
     }
+    f = &file;
   }
 
-  while ((read = getdelim(&line, &len, delim, f)) != -1) {
-    line[read - 1] = '\0';   // strip the delimiter
-    extra.emplace_back(line);
-  }
+  std::string line;
+  while (std::getline(*f, line, static_cast<char>(delim)))
+    extra.push_back(line);
 
-  free(line);
-  if (f != stdin)
-    fclose(f);
+  if (f != &std::cin)
+    file.close();
 }
 
 static void remove_pidfile(CliOptions& o) {
-  if (unlink(o.pidfile) < 0 && errno != ENOENT) {
+  if (unlink(std::string(o.pidfile).c_str()) < 0 && errno != ENOENT) {
     warning(o.quiet, std::format("unable to remove pidfile {} ({})", o.pidfile, strerror(errno)));
   }
 }
 
 static void write_pidfile(CliOptions& o) {
-  std::ofstream f(o.pidfile);
+  std::ofstream f(std::string(o.pidfile));
   if (!f) {
     warning(o.quiet, std::format("unable to open pidfile {} ({})", o.pidfile, strerror(errno)));
     return;
@@ -404,7 +392,6 @@ static void register_signals_for_pidfile(const CliOptions& o) {
 
 
 static int run(int argc, char **argv) {
-  int ch, i;
   struct timeval start_time;
   struct timeval end_time;
 
@@ -420,36 +407,61 @@ static int run(int argc, char **argv) {
 
   // -f/-F/-h/-i/-I are gone: traversal policy is fixed, the flags are
   // rejected as unknown options (-> usage).
-  while((ch = getopt(argc, argv, "tevqlLd0p:b:m:P:wo:")) != -1) {
-    switch(ch) {
-      case '?': usage(); break;
-      case 't': o.touch = 1; break;
-      case 'e': o.evict = 1; break;
-      case 'q': o.quiet = 1; break;
-      case 'v': o.verbose++; break;
-      case 'l': o.lock = 1;
-                o.touch = 1; break;
-      case 'L': o.lockall = 1;
-                o.touch = 1; break;
-      case 'd': o.daemon = 1; break;
-      case 'p': parse_range(optarg, f); break;
-      case 'm': {
-        const int64_t val = parse_size(optarg);
-        lib_opts.max_file_size = static_cast<size_t>(val);
-        if (val != static_cast<int64_t>(lib_opts.max_file_size))
-          fatal("value for -m too big to fit in a size_t");
-        break;
+  const std::vector<std::string_view> args(argv + 1, argv + argc);
+  size_t i = 0;
+  for (; i < args.size(); ++i) {
+    std::string_view arg = args[i];
+
+    if (arg == "--") {   // explicit end-of-options
+      ++i;
+      break;
+    }
+    if (!arg.starts_with('-') || arg == "-")
+      break;             // first operand: everything from here is a path
+
+    // Clustered short flags: -qv processes q then v. A flag that takes a
+    // value consumes the rest of the cluster or the next argument.
+    for (size_t c = 1; c < arg.size(); ++c) {
+      const char ch = arg[c];
+      auto value = [&]() -> std::string_view {
+        if (c + 1 < arg.size()) {                 // attached: -p1M-2M
+          const std::string_view v = arg.substr(c + 1);
+          c = arg.size();
+          return v;
+        }
+        if (i + 1 < args.size())                  // separate: -p 1M-2M
+          return args[++i];
+        fatal(std::format("option -{} requires an argument", ch));   // noreturn
+      };
+
+      switch (ch) {
+        case 't': o.touch = 1; break;
+        case 'e': o.evict = 1; break;
+        case 'q': o.quiet = 1; break;
+        case 'v': o.verbose++; break;
+        case 'l': o.lock = 1; o.touch = 1; break;
+        case 'L': o.lockall = 1; o.touch = 1; break;
+        case 'd': o.daemon = 1; break;
+        case 'w': o.wait = 1; break;
+        case '0': o.zero_delim = 1; break;
+        case 'p': parse_range(value(), f); break;
+        case 'm': {
+          const int64_t val = parse_size(value());
+          lib_opts.max_file_size = static_cast<size_t>(val);
+          if (val != static_cast<int64_t>(lib_opts.max_file_size))
+            fatal("value for -m too big to fit in a size_t");
+          break;
+        }
+        case 'b': o.batch = value(); break;
+        case 'P': o.pidfile = value(); break;
+        case 'o': o.output = value(); break;
+        default:
+          usage();   // unknown flag (covers the dropped -f/-F/-h/-i/-I)
       }
-      case 'w': o.wait = 1; break;
-      case 'b': o.batch = optarg; break;
-      case '0': o.zero_delim = 1; break;
-      case 'P': o.pidfile = optarg; break;
-      case 'o': o.output = optarg; break;
     }
   }
 
-  argc -= optind;
-  argv += optind;
+  std::vector<std::string_view> operands(args.begin() + i, args.end());
 
   if (o.touch && o.evict)
     fatal("invalid option combination: -t and -e");
@@ -471,9 +483,9 @@ static int run(int argc, char **argv) {
 
   if (o.quiet && o.verbose) fatal("invalid option combination: -q and -v");
 
-  if (o.pidfile && (!o.lock && !o.lockall)) fatal("pidfile can only be created when -l or -L is specified");
+  if (!o.pidfile.empty() && (!o.lock && !o.lockall)) fatal("pidfile can only be created when -l or -L is specified");
 
-  if (!argc && !o.batch) {
+  if (operands.empty() && o.batch.empty()) {
     std::cout << std::format("{}: no files or directories specified\n", prog);
     usage();
   }
@@ -495,8 +507,9 @@ static int run(int argc, char **argv) {
   gettimeofday(&start_time, NULL);
 
   std::vector<std::string> roots;
-  if (o.batch) read_batch_paths(o, roots);
-  for (i=0; i<argc; i++) roots.emplace_back(argv[i]);
+  if (!o.batch.empty()) read_batch_paths(o, roots);
+  for (const std::string_view op : operands)
+    roots.emplace_back(op);
 
   const Status st = g_session->process(roots);
 
@@ -538,7 +551,7 @@ static int run(int argc, char **argv) {
         fatal(std::format("unable to mlockall ({})", strerror(errno)));
     }
 
-    if (o.pidfile) {
+    if (!o.pidfile.empty()) {
       register_signals_for_pidfile(o);
       write_pidfile(o);
     }
@@ -554,7 +567,7 @@ static int run(int argc, char **argv) {
   }
 
   if (!o.quiet) {
-    if (o.output == NULL) {
+    if (o.output.empty()) {
       if (o.verbose)
         std::cout << "\n";
       std::cout << std::format("           Files: {}\n", rep.total_files);

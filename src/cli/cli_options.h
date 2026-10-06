@@ -17,14 +17,14 @@ struct CliOptions {
     // Output policy.
     bool quiet = false;      // -q
     int verbose = 0;         // -v (accepted; totals-only)
-    const char* output = nullptr;   // -o (only "kv")
+    std::string_view output;         // -o (only "kv")
 
     // Process management.
     bool daemon = false;     // -d
     bool wait = false;       // -w
-    const char* pidfile = nullptr;  // -P
+    std::string_view pidfile;        // -P
 
     // Input mode.
-    const char* batch = nullptr;    // -b
+    std::string_view batch;         // -b
     bool zero_delim = false;        // -0
 };
