@@ -43,11 +43,12 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #include <charconv>
 #include <cctype>
 #include <cstdint>
-#include <cstdio>       // freopen, select(2)-era FILE* for reopen_all
-#include <cstring>
+#include <cstdio>       // freopen for reopen_all
+#include <cstring>      // strerror
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <memory>       // unique_ptr for g_session
 #include <string>
 #include <string_view>
 #include <vector>
@@ -124,55 +125,55 @@ static void warning(bool quiet, std::string_view msg) {
 static std::string format_failure(const Failure& f) {
   switch (f.kind) {
     case Failure::Kind::Open:
-      return "unable to open " + f.path + " (" + strerror(f.err) + "), skipping";
+      return std::format("unable to open {} ({}), skipping", f.path, strerror(f.err));
     case Failure::Kind::Stat:
-      return "unable to stat " + f.path + " (" + strerror(f.err) + ")";
+      return std::format("unable to stat {} ({})", f.path, strerror(f.err));
     case Failure::Kind::FstatFailed:
-      return "unable to fstat " + f.path + " (" + strerror(f.err) + "), skipping";
+      return std::format("unable to fstat {} ({}), skipping", f.path, strerror(f.err));
     case Failure::Kind::IoctlSizeFailed:
-      return "unable to ioctl " + f.path + " (" + strerror(f.err) + "), skipping";
+      return std::format("unable to ioctl {} ({}), skipping", f.path, strerror(f.err));
     case Failure::Kind::Map:
-      return "unable to mmap file " + f.path + " (" + strerror(f.err) + "), skipping";
+      return std::format("unable to mmap file {} ({}), skipping", f.path, strerror(f.err));
     case Failure::Kind::MunmapFailed:
-      return "unable to munmap file " + f.path + " (" + strerror(f.err) + ")";
+      return std::format("unable to munmap file {} ({})", f.path, strerror(f.err));
     case Failure::Kind::OpendirFailed:
-      return "unable to opendir " + f.path + " (" + strerror(f.err) + "), skipping";
+      return std::format("unable to opendir {} ({}), skipping", f.path, strerror(f.err));
     case Failure::Kind::TooLarge:
-      return "file " + f.path + " too large, skipping";
+      return std::format("file {} too large, skipping", f.path);
     case Failure::Kind::BeyondEof:
-      return "file " + f.path + " smaller than offset, skipping";
+      return std::format("file {} smaller than offset, skipping", f.path);
     case Failure::Kind::NotRegular:
-      return "skipping non-regular file: " + f.path;
+      return std::format("skipping non-regular file: {}", f.path);
     case Failure::Kind::Symlink:
-      return "not following symbolic link " + f.path;
+      return std::format("not following symbolic link {}", f.path);
     case Failure::Kind::SeparateFs:
-      return "not recursing into separate filesystem " + f.path;
+      return std::format("not recursing into separate filesystem {}", f.path);
     case Failure::Kind::CrawlLoop:
-      return "symbolic link loop detected: " + f.path;
+      return std::format("symbolic link loop detected: {}", f.path);
     case Failure::Kind::PathTooLong:
-      return "path too long " + f.path;
+      return std::format("path too long {}", f.path);
     case Failure::Kind::MincoreInaccurate:
       return "Process does not have write permission, residency chart will not be accurate";
     case Failure::Kind::EvictFailed:
-      return "unable to evict " + f.path + " (" + strerror(f.err) + ")";
+      return std::format("unable to evict {} ({})", f.path, strerror(f.err));
     case Failure::Kind::EvictAdviseFailed:
-      return "unable to posix_fadvise file " + f.path + " (" + strerror(f.err) + ")";
+      return std::format("unable to posix_fadvise file {} ({})", f.path, strerror(f.err));
     case Failure::Kind::EvictInvalidateFailed:
-      return "unable to msync invalidate file " + f.path + " (" + strerror(f.err) + ")";
+      return std::format("unable to msync invalidate file {} ({})", f.path, strerror(f.err));
     case Failure::Kind::MlockFailed:
       // Historical text (a fatal there; a warning here).
-      return "mlock: " + f.path + " (" + strerror(f.err) + ")";
+      return std::format("mlock: {} ({})", f.path, strerror(f.err));
     case Failure::Kind::MincoreFailed:
-      // No upstream text exists: mincore failure was always fatal there.
-      return "unable to mincore file " + f.path + " (" + strerror(f.err) + ")";
+      // No historical text exists: mincore failure was always fatal there.
+      return std::format("unable to mincore file {} ({})", f.path, strerror(f.err));
     case Failure::Kind::Fatal:
       // Terminal record: rendered as the FATAL text. The message text
       // already carries the site formatting from the engine.
       return f.path.empty()
                  ? std::string(strerror(f.err))
-                 : f.path + " (" + strerror(f.err) + ")";
+                 : std::format("{} ({})", f.path, strerror(f.err));
     case Failure::Kind::Closedir:
-      return "unable to closedir " + f.path + " (" + strerror(f.err) + ")";
+      return std::format("unable to closedir {} ({})", f.path, strerror(f.err));
   }
   return "";
 }
@@ -228,15 +229,17 @@ void go_daemon(CliOptions& o) {
 }
 
 
-// Human-readable size: 123 -> "123", 4096 -> "4K", etc.
-static std::string pretty_print_size(int64_t inp) {
-  if (inp < 1024)
-    return std::format("{}", inp);
-  if (inp / 1024 < 1024)
-    return std::format("{}K", inp / 1024);
-  if (inp / (1024 * 1024) < 1024)
-    return std::format("{}M", inp / (1024 * 1024));
-  return std::format("{}G", inp / (1024 * 1024 * 1024));
+// Human-readable size: 123 -> "123", 4096 -> "4K", 5G+ -> "5G".
+// Integer floor, as upstream: 1536 bytes prints "1K".
+static std::string pretty_print_size(int64_t bytes) {
+  static constexpr std::string_view unit[] = {"", "K", "M", "G"};
+  int64_t v = bytes;
+  size_t u = 0;
+  while (v >= 1024 && u < 3) {
+    v /= 1024;
+    ++u;
+  }
+  return std::format("{}{}", v, unit[u]);
 }
 
 // Parses "4096", "4k", "100M", "1.5G" (case-insensitive suffix).
@@ -306,11 +309,6 @@ void parse_range(std::string_view inp, FileInfoRange& f) {
   }
 }
 
-
-
-#ifdef __linux__
-// (can_do_mincore lives in core/platform.cpp.)
-#endif
 
 
 static std::unique_ptr<Session> g_session;
@@ -392,9 +390,6 @@ static void register_signals_for_pidfile(const CliOptions& o) {
 
 
 static int run(int argc, char **argv) {
-  struct timeval start_time;
-  struct timeval end_time;
-
   CliOptions o;          // CLI-level state (never rides on core Options)
   Options lib_opts;      // the library's Options (verb/range/max_file_size/collect)
   FileInfoRange f;
@@ -504,16 +499,12 @@ static int run(int argc, char **argv) {
   // Must happen before fork(): mlock() is not inherited across fork().
   if (o.daemon) go_daemon(o);
 
-  gettimeofday(&start_time, NULL);
-
   std::vector<std::string> roots;
   if (!o.batch.empty()) read_batch_paths(o, roots);
   for (const std::string_view op : operands)
     roots.emplace_back(op);
 
   const Status st = g_session->process(roots);
-
-  gettimeofday(&end_time, NULL);
 
   // Failures (including the Fatal record) come from the Report; the quiet
   // policy gates PRINTING here in the CLI.
@@ -531,7 +522,7 @@ static int run(int argc, char **argv) {
   int64_t total_pages_in_core_size = rep.total_pages_in_core * pagesize;
   int64_t total_pages_size         = rep.total_pages * pagesize;
   double  total_pages_in_core_perc = 100.0 * rep.total_pages_in_core / rep.total_pages;
-  double  elapsed                  = (end_time.tv_sec - start_time.tv_sec) + (double)(end_time.tv_usec - start_time.tv_usec)/1000000.0;
+  const double elapsed             = rep.elapsed_seconds;   // steady_clock, measured through fatals
 
   if (st == Status::Fatal) {
     // The Fatal record is always stored, never gated.

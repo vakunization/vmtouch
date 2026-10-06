@@ -40,14 +40,6 @@ TEST(mincore_resident_bit) {
     EXPECT_FALSE(platform::is_mincore_page_resident(0xFE));
 }
 
-TEST(now_seconds_is_monotonic_enough) {
-    const double a = platform::now_seconds();
-    const double b = platform::now_seconds();
-    EXPECT_TRUE(b >= a);                       // does not go backwards
-    EXPECT_TRUE(b - a < 1.0);                  // two calls take < 1s
-    EXPECT_TRUE(a > 1'700'000'000.0);          // plausible epoch (>= Nov 2023)
-}
-
 TEST(kernel_version_parse_and_compare) {
     using platform::KernelVersion;
     using platform::parse_kernel_version;

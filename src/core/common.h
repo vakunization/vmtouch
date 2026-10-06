@@ -13,8 +13,6 @@
 
 #include <sys/types.h>   // dev_t, ino_t
 
-inline constexpr const char* VMTOUCH_VERSION = "1.3.1";
-
 // Set once at startup by the CLI (platform::init()).
 extern long pagesize;
 
@@ -67,11 +65,11 @@ struct Failure {
         BeyondEof = 5,        // -p offset beyond EOF
         NotRegular = 6,       // skipping non-regular file
         Symlink = 7,          // not following symbolic link
-        SeparateFs = 8,       // -F: not recursing into other filesystem
+        SeparateFs = 8,       // RESERVED, no current producer (crawler never emits)
         CrawlLoop = 9,        // symbolic link loop detected
-        PathTooLong = 10,     // path exceeds PATH_MAX
-        MincoreInaccurate = 11, // RESERVED (kernel >= 5.2 heuristic) — not produced
-        EvictFailed = 12,     // legacy umbrella — not produced (18/19 supersede)
+        PathTooLong = 10,     // RESERVED, no current producer (paths are unbounded)
+        MincoreInaccurate = 11, // RESERVED, no current producer
+        EvictFailed = 12,     // RESERVED, no current producer (superseded by 18/19)
         Closedir = 13,        // unable to closedir
         FstatFailed = 14,     // unable to fstat PATH (ERR), skipping
         IoctlSizeFailed = 15, // unable to ioctl PATH (ERR), skipping

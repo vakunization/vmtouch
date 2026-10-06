@@ -5,7 +5,9 @@
 
 #pragma once
 
-#include "core/common.h"
+#include <string_view>
+
+inline constexpr std::string_view VMTOUCH_VERSION = "1.3.1";
 
 struct CliOptions {
     // Verb selection (validated: -t/-e/-l/-L are mutually exclusive).
