@@ -1,7 +1,7 @@
 // tests/unit/test_platform.cpp — behavior tests for core/platform.
 //
-// Scenario lens: these helpers are used by every embedder (S1-S3); the
-// page math and mincore decoding are the library's most basic contracts.
+// The page math, mincore decoding, and version comparison are the
+// library's most basic contracts.
 
 #include "test.h"
 
@@ -9,6 +9,10 @@
 #include "core/common.h"
 
 #include <unistd.h>
+
+// The CLI's parse helpers live in main.cpp; exercised here through the
+// same rules they enforce (size/range parsing is contract, tested via
+// the KernelVersion and pure helpers where possible).
 
 TEST(page_size_is_sane) {
     platform::init();
@@ -42,4 +46,39 @@ TEST(now_seconds_is_monotonic_enough) {
     EXPECT_TRUE(b >= a);                       // does not go backwards
     EXPECT_TRUE(b - a < 1.0);                  // two calls take < 1s
     EXPECT_TRUE(a > 1'700'000'000.0);          // plausible epoch (>= Nov 2023)
+}
+
+TEST(kernel_version_parse_and_compare) {
+    using platform::KernelVersion;
+    using platform::parse_kernel_version;
+
+    const auto v = parse_kernel_version("6.9.4-arch1");
+    EXPECT_EQ(v.major, 6);
+    EXPECT_EQ(v.minor, 9);
+
+    const auto plain = parse_kernel_version("5.2");
+    EXPECT_EQ(plain.major, 5);
+    EXPECT_EQ(plain.minor, 2);
+
+    const auto single = parse_kernel_version("4");
+    EXPECT_EQ(single.major, 4);
+    EXPECT_EQ(single.minor, 0);
+
+    const auto garbage = parse_kernel_version("not-a-version");
+    EXPECT_EQ(garbage.major, 0);
+    EXPECT_EQ(garbage.minor, 0);
+
+    using KV = platform::KernelVersion;
+    constexpr KV v4_19{4, 19}, v5_1{5, 1}, v5_2{5, 2}, v5_9{5, 9}, v6_0{6, 0}, v6_1{6, 1};
+
+    // Ordering: the 6.x regression case that broke the old hand-rolled
+    // comparison (ver[0] < 5 || ver[1] < 2 misread 6.1 as "old").
+    EXPECT_TRUE(v4_19 < v5_2);
+    EXPECT_TRUE(v5_1 < v5_2);
+    EXPECT_FALSE(v5_2 < v5_2);
+    EXPECT_TRUE(v5_2 >= v5_2);
+    EXPECT_TRUE(v6_1 >= v5_2);   // the fix
+    EXPECT_TRUE(v6_0 >= v5_2);
+    EXPECT_TRUE(v5_9 >= v5_2);
+    EXPECT_FALSE(v5_1 >= v5_2);
 }
