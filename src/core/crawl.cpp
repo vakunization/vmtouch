@@ -11,7 +11,6 @@
 #include <cstring>
 
 #include <dirent.h>
-#include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -34,12 +33,10 @@ void Crawler::walk(std::string path, const CrawlVisitor& visitor) {
 
 void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
     struct stat sb;
-    char npath[PATH_MAX];
 
     // strip a trailing slash (path is this frame's private copy)
-    const int tp_path_len = static_cast<int>(path.size());
-    if (tp_path_len > 1 && path[tp_path_len - 1] == '/')
-        path.erase(tp_path_len - 1);
+    if (path.size() > 1 && path.back() == '/')
+        path.pop_back();
     const char* cpath = path.c_str();
 
     int res = lstat(cpath, &sb);   // fixed policy: never follow symlinks
@@ -112,16 +109,14 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
             if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
                 continue;
 
-            if (snprintf(npath, sizeof(npath), "%s/%s", cpath, de->d_name) >=
-                static_cast<int>(sizeof(npath))) {
-                const Failure f{Failure::Kind::PathTooLong, 0, path, 0};
-                visitor(CrawlItem{path, &f});
-                break;
-            }
+            std::string child;
+            child.reserve(path.size() + 1 + strlen(de->d_name));
+            child += cpath;
+            child += '/';
+            child += de->d_name;
 
             state_.curr_crawl_depth++;
-            std::string child(npath);   // recursion: child gets its own path copy
-            walk_impl(child, visitor);
+            walk_impl(child, visitor);   // recursion: child is this frame's own copy
             state_.curr_crawl_depth--;
         }
 
