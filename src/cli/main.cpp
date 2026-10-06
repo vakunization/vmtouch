@@ -25,9 +25,6 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 ***********************************************************************/
 
 
-#define RESIDENCY_CHART_WIDTH 60
-#define CHART_UPDATE_INTERVAL 0.1
-
 #if defined(__linux__) || (defined(__hpux) && !defined(__LP64__))
 // Make sure off_t is 64 bits on linux and when creating 32bit programs
 // on HP-UX.
@@ -42,35 +39,28 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #define _BSD_SOURCE
 #endif
 
-#include <stdio.h>
-#include <string.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <ctype.h>
-#include <stdarg.h>
-#include <stdint.h>
-#include <time.h>
+#include <cerrno>
+#include <charconv>
+#include <cctype>
+#include <cstdint>
+#include <cstdio>       // freopen, select(2)-era FILE* for reopen_all
+#include <cstring>
+#include <format>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include <fcntl.h>
 #include <signal.h>
+#include <sys/mman.h>   // mlockall
 #include <sys/select.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/time.h>
-#include <sys/mman.h>   // mlockall
+#include <sys/types.h>
 #include <sys/wait.h>
-#include <limits.h>
-#include <inttypes.h>
-#include <functional>
-#include <errno.h>
-#include <math.h>      // HUGE_VAL in parse_size
-#include <fcntl.h>
-
-#if defined(__linux__)
-// Used to find size of block devices
-#include <sys/ioctl.h>
-#include <sys/mount.h>
-// Used to check kernal version to know if mincore reports correctly
-#include <sys/utsname.h>
-#endif
+#include <unistd.h>
 
 #include "cli_options.h"
 #include "core/common.h"
@@ -84,64 +74,49 @@ int exit_pipe[2];
 
 int daemon_pid;
 
-
 // wait is passed explicitly: this must work both in the daemon child (which
 // owns `o`) and from main()'s catch handler without any global CliOptions*.
 void send_exit_signal(const CliOptions& o, char code) {
   if (daemon_pid == 0 && o.wait) {
     if (write(exit_pipe[1], &code, 1) < 0)
-      fprintf(stderr, "vmtouch: FATAL: write: %s", strerror(errno));
+      std::fputs("vmtouch: FATAL: write\n", stderr);
   }
 }
 
 void usage() {
-  printf("\n");
-  printf("vmtouch v%s - the Virtual Memory Toucher by Doug Hoyte\n", VMTOUCH_VERSION);
-  printf("Portable file system cache diagnostics and control\n\n");
-  printf("Usage: vmtouch [OPTIONS] ... FILES OR DIRECTORIES ...\n\nOptions:\n");
-  printf("  -t touch pages into memory\n");
-  printf("  -e evict pages from memory\n");
-  printf("  -l lock pages in physical memory with mlock(2)\n");
-  printf("  -L lock pages in physical memory with mlockall(2)\n");
-  printf("  -d daemon mode\n");
-  printf("  -m <size> max file size to touch\n");
-  printf("  -p <range> use the specified portion instead of the entire file\n");
-  printf("  -b <list file> get files or directories from the list file\n");
-  printf("  -0 in batch mode (-b) separate paths with NUL byte instead of newline\n");
-  printf("  -w wait until all pages are locked (only useful together with -d)\n");
-  printf("  -P <pidfile> write a pidfile (only useful together with -l or -L)\n");
-  printf("  -o <type> output in machine friendly format.  'kv' for key=value pairs.\n");
-  printf("  -v verbose\n");
-  printf("  -q quiet\n");
+  std::cout << std::format(
+      "\n"
+      "vmtouch v{} - the Virtual Memory Toucher by Doug Hoyte\n"
+      "Portable file system cache diagnostics and control\n\n"
+      "Usage: vmtouch [OPTIONS] ... FILES OR DIRECTORIES ...\n\n"
+      "Options:\n"
+      "  -t touch pages into memory\n"
+      "  -e evict pages from memory\n"
+      "  -l lock pages in physical memory with mlock(2)\n"
+      "  -L lock pages in physical memory with mlockall(2)\n"
+      "  -d daemon mode\n"
+      "  -m <size> max file size to touch\n"
+      "  -p <range> use the specified portion instead of the entire file\n"
+      "  -b <list file> get files or directories from the list file\n"
+      "  -0 in batch mode (-b) separate paths with NUL byte instead of newline\n"
+      "  -w wait until all pages are locked (only useful together with -d)\n"
+      "  -P <pidfile> write a pidfile (only useful together with -l or -L)\n"
+      "  -o <type> output in machine friendly format.  'kv' for key=value pairs.\n"
+      "  -v verbose\n"
+      "  -q quiet\n",
+      VMTOUCH_VERSION);
   exit(1);
 }
 
-// Fatal situations no longer exit() here: the code throws FatalError and
+// Fatal situations do not exit() here: the code throws FatalError and
 // main()'s single handler prints the message and exits 1.
-static void fatal(const char *fmt, ...) {
-  va_list ap;
-  char buf[4096];
-
-  va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
-  va_end(ap);
-
-  throw FatalError(buf);
+static void fatal(std::string_view msg) {
+  throw FatalError(std::string(msg));
 }
 
-// Old vararg warning kept for CLI-side messages (pidfile/signal paths).
-// The quiet flag is a NAMED parameter, so it must be passed BEFORE the
-// varargs; va_start on it (not fmt) is what makes vsnprintf read the
-// format arguments correctly.
-static void warning(const char *fmt, bool quiet, ...) {
-  va_list ap;
-  char buf[4096];
-
-  va_start(ap, quiet);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
-  va_end(ap);
-
-  if (!quiet) fprintf(stderr, "vmtouch: WARNING: %s\n", buf);
+static void warning(bool quiet, std::string_view msg) {
+  if (!quiet)
+    std::cerr << std::format("vmtouch: WARNING: {}\n", msg);
 }
 
 // Converts a structured Failure record to the historical warning text.
@@ -206,7 +181,7 @@ static void reopen_all() {
   if (freopen("/dev/null", "r", stdin) == NULL ||
       freopen("/dev/null", "w", stdout) == NULL ||
       freopen("/dev/null", "w", stdout) == NULL)
-    fatal("freopen: %s", strerror(errno));
+    fatal(std::format("freopen: {}", strerror(errno)));
 }
 
 static int wait_for_child() {
@@ -222,7 +197,7 @@ static int wait_for_child() {
     tv.tv_usec = 0;
     FD_SET(exit_pipe[0], &rfds);
     if (select(exit_pipe[0] + 1, &rfds, NULL, NULL, &tv) < 0)
-      fatal("select: %s", strerror(errno));
+      fatal(std::format("select: {}", strerror(errno)));
 
     if (waitpid(daemon_pid, &wait_status, WNOHANG) > 0)
       fatal("daemon shut down unexpectedly");
@@ -232,14 +207,14 @@ static int wait_for_child() {
   }
   exit_read = read(exit_pipe[0], &exit_value, 1);
   if (exit_read < 0)
-    fatal("read: %s", strerror(errno));
+    fatal(std::format("read: {}", strerror(errno)));
   return exit_value;
 }
 
 void go_daemon(CliOptions& o) {
   daemon_pid = fork();
   if (daemon_pid == -1)
-    fatal("fork: %s", strerror(errno));
+    fatal(std::format("fork: {}", strerror(errno)));
   if (daemon_pid) {
     if (o.wait)
       exit(wait_for_child());
@@ -247,97 +222,85 @@ void go_daemon(CliOptions& o) {
   }
 
   if (setsid() == -1)
-    fatal("setsid: %s", strerror(errno));
+    fatal(std::format("setsid: {}", strerror(errno)));
 
   if (!o.wait) reopen_all();
 }
 
 
-char *pretty_print_size(int64_t inp) {
-  static char output[100];
-
-  if (inp<1024) {
-    snprintf(output, sizeof(output), "%" PRId64, inp);
-    return output;
-  }
-  inp /= 1024;
-  if (inp<1024) {
-    snprintf(output, sizeof(output), "%" PRId64 "K", inp);
-    return output;
-  }
-  inp /= 1024;
-  if (inp<1024) {
-    snprintf(output, sizeof(output), "%" PRId64 "M", inp);
-    return output;
-  }
-  inp /= 1024;
-  snprintf(output, sizeof(output), "%" PRId64 "G", inp);
-  return output;
+// Human-readable size: 123 -> "123", 4096 -> "4K", etc.
+static std::string pretty_print_size(int64_t inp) {
+  if (inp < 1024)
+    return std::format("{}", inp);
+  if (inp / 1024 < 1024)
+    return std::format("{}K", inp / 1024);
+  if (inp / (1024 * 1024) < 1024)
+    return std::format("{}M", inp / (1024 * 1024));
+  return std::format("{}G", inp / (1024 * 1024 * 1024));
 }
 
-/*
- *  Convert ASCII string to int64_t number
- *  Note: The inp parameter can't be a character constant
- *        because it will be overwritten.
- */
-int64_t parse_size(char *inp) {
-  char *tp;
-  int len=strlen(inp);
-  const char *errstr = "bad size. examples: 4096, 4k, 100M, 1.5G";
-  char mult_char;
-  int mult=1;
-  double val;
+// Parses "4096", "4k", "100M", "1.5G" (case-insensitive suffix).
+int64_t parse_size(std::string_view inp) {
+  const std::string_view errstr = "bad size. examples: 4096, 4k, 100M, 1.5G";
 
-  if (len < 1) fatal(errstr);
+  if (inp.empty())
+    fatal(errstr);
 
-  mult_char = tolower(inp[len-1]);
-
-  if (isalpha(mult_char)) {
-    switch(mult_char) {
+  int64_t mult = 1;
+  const char mult_char = static_cast<char>(std::tolower(static_cast<unsigned char>(inp.back())));
+  if (std::isalpha(static_cast<unsigned char>(mult_char))) {
+    switch (mult_char) {
       case 'k': mult = 1024; break;
-      case 'm': mult = 1024*1024; break;
-      case 'g': mult = 1024*1024*1024; break;
-      default: fatal("unknown size multiplier: %c", mult_char);
+      case 'm': mult = 1024 * 1024; break;
+      case 'g': mult = 1024 * 1024 * 1024; break;
+      default: fatal(std::format("unknown size multiplier: {}", mult_char));
     }
-    inp[len-1] = '\0';
+    inp.remove_suffix(1);
   }
 
-  val = strtod(inp, &tp);
-
-  if (val < 0 || val == HUGE_VAL || *tp != '\0') fatal(errstr);
+  double val = 0;
+  const char* begin = inp.data();
+  const char* end = inp.data() + inp.size();
+  const auto [ptr, ec] = std::from_chars(begin, end, val);
+  if (ec != std::errc{} || ptr != end || val < 0)
+    fatal(errstr);
 
   val *= mult;
+  if (val > static_cast<double>(INT64_MAX))
+    fatal(errstr);
 
-  if (val > INT64_MAX) fatal(errstr);
-
-  return (int64_t) val;
+  return static_cast<int64_t>(val);
 }
 
-void parse_range(char *inp, FileInfoRange& f) {
-  char *token;
-  int64_t upper_range=0;
-  int64_t lower_range=0;
+// Parses "SIZE", "-SIZE", "SIZE-SIZE" into a page-aligned file range.
+void parse_range(std::string_view inp, FileInfoRange& f) {
+  int64_t upper_range = 0;
+  int64_t lower_range = 0;
 
-  token = strsep(&inp,"-");
+  const size_t first_dash = inp.find('-');
+  if (first_dash == std::string_view::npos) {
+    upper_range = parse_size(inp);   // single value provided
+  } else {
+    const std::string_view before = inp.substr(0, first_dash);
+    std::string_view rest = inp.substr(first_dash + 1);
 
-  if (inp == NULL)
-    upper_range = parse_size(token); // single value provided
-  else {
-    if (*token != '\0')
-      lower_range = parse_size(token); // value before hyphen
+    if (!before.empty())
+      lower_range = parse_size(before);   // value before hyphen
 
-    token = strsep(&inp,"-");
-    if (*token != '\0')
-      upper_range = parse_size(token); // value after hyphen
+    const size_t second_dash = rest.find('-');
+    if (second_dash != std::string_view::npos)
+      fatal("malformed range: multiple hyphens");
 
-    if ((token = strsep(&inp,"-")) != NULL) fatal("malformed range: multiple hyphens");
+    if (!rest.empty())
+      upper_range = parse_size(rest);   // value after hyphen
   }
 
   // offset must be multiple of pagesize
   f.offset = (lower_range / pagesize) * pagesize;
 
   if (upper_range) {
-    if (upper_range <= f.offset) fatal("range limits out of order");
+    if (upper_range <= f.offset)
+      fatal("range limits out of order");
 
     f.max_len = upper_range - f.offset;
   }
@@ -350,43 +313,6 @@ void parse_ignore_item(const char * /*inp*/, Options& /*o*/) {}
 void parse_filename_filter_item(const char * /*inp*/, Options& /*o*/) {}
 
 
-
-
-void print_page_residency_chart(FILE *out, char *mincore_array, int64_t pages_in_file) {
-  int64_t pages_in_core=0;
-  int64_t pages_per_char;
-  int64_t i,j=0,curr=0;
-
-  if (pages_in_file <= RESIDENCY_CHART_WIDTH) pages_per_char = 1;
-  else pages_per_char = (pages_in_file / RESIDENCY_CHART_WIDTH) + 1;
-
-  fprintf(out, "\r[");
-
-  for (i=0; i<pages_in_file; i++) {
-    if (platform::is_mincore_page_resident(mincore_array[i])) {
-      curr++;
-      pages_in_core++;
-    }
-    j++;
-    if (j == pages_per_char) {
-      if (curr == pages_per_char) fprintf(out, "O");
-      else if (curr == 0) fprintf(out, " ");
-      else fprintf(out, "o");
-
-      j = curr = 0;
-    }
-  }
-
-  if (j) {
-    if (curr == j) fprintf(out, "O");
-    else if (curr == 0) fprintf(out, " ");
-    else fprintf(out, "o");
-  }
-
-  fprintf(out, "] %" PRId64 "/%" PRId64, pages_in_core, pages_in_file);
-
-  fflush(out);
-}
 
 
 #ifdef __linux__
@@ -414,8 +340,7 @@ static void read_batch_paths(const CliOptions& o, std::vector<std::string>& extr
   } else {
     f = fopen(o.batch, "r");
     if (!f) {
-      fprintf(stderr, "vmtouch: WARNING: unable to open %s (%s), skipping\n",
-              o.batch, strerror(errno));
+      warning(false, std::format("unable to open {} ({})", o.batch, strerror(errno)));
       return;
     }
   }
@@ -431,30 +356,23 @@ static void read_batch_paths(const CliOptions& o, std::vector<std::string>& extr
 }
 
 static void remove_pidfile(CliOptions& o) {
-  int res = 0;
-
-  res = unlink(o.pidfile);
-  if (res < 0 && errno != ENOENT) {
-    warning("unable to remove pidfile %s (%s)", o.quiet, o.pidfile, strerror(errno));
+  if (unlink(o.pidfile) < 0 && errno != ENOENT) {
+    warning(o.quiet, std::format("unable to remove pidfile {} ({})", o.pidfile, strerror(errno)));
   }
 }
 
 static void write_pidfile(CliOptions& o) {
-  FILE *f = NULL;
-
-
-  f = fopen(o.pidfile, "w");
+  std::ofstream f(o.pidfile);
   if (!f) {
-    warning("unable to open pidfile %s (%s), skipping", o.quiet, o.pidfile, strerror(errno));
+    warning(o.quiet, std::format("unable to open pidfile {} ({})", o.pidfile, strerror(errno)));
     return;
   }
 
-  const ssize_t wrote = fprintf(f, "%d\n", getpid());
+  f << getpid() << '\n';
+  f.close();
 
-  fclose(f);
-
-  if (wrote < 0) {
-    warning("unable to write to pidfile %s (%s), deleting it", o.quiet, o.pidfile, strerror(errno));
+  if (!f) {
+    warning(o.quiet, std::format("unable to write to pidfile {} ({})", o.pidfile, strerror(errno)));
     remove_pidfile(o);
   }
 }
@@ -476,7 +394,7 @@ static void register_signals_for_pidfile(const CliOptions& o) {
   if (sigaction(SIGINT, &sa, NULL) < 0 ||
       sigaction(SIGTERM, &sa, NULL) < 0 ||
       sigaction(SIGQUIT, &sa, NULL) < 0) {
-    warning("unable to register signals for pidfile (%s), skipping", o.quiet, strerror(errno));
+    warning(o.quiet, std::format("unable to register signals for pidfile ({})", strerror(errno)));
   }
 }
 
@@ -487,16 +405,16 @@ static void register_signals_for_pidfile(const CliOptions& o) {
 
 static int run(int argc, char **argv) {
   int ch, i;
-  char *prog = argv[0];
   struct timeval start_time;
   struct timeval end_time;
 
   CliOptions o;          // CLI-level state (never rides on core Options)
   Options lib_opts;      // the library's Options (verb/range/max_file_size/collect)
   FileInfoRange f;
+  const std::string prog = argv[0];
 
   if (pipe(exit_pipe))
-    fatal("pipe: %s", strerror(errno));
+    fatal(std::format("pipe: {}", strerror(errno)));
 
   platform::init();
 
@@ -516,9 +434,10 @@ static int run(int argc, char **argv) {
       case 'd': o.daemon = 1; break;
       case 'p': parse_range(optarg, f); break;
       case 'm': {
-        int64_t val = parse_size(optarg);
-        lib_opts.max_file_size = (size_t) val;
-        if (val != (int64_t) lib_opts.max_file_size) fatal("value for -m too big to fit in a size_t");
+        const int64_t val = parse_size(optarg);
+        lib_opts.max_file_size = static_cast<size_t>(val);
+        if (val != static_cast<int64_t>(lib_opts.max_file_size))
+          fatal("value for -m too big to fit in a size_t");
         break;
       }
       case 'w': o.wait = 1; break;
@@ -532,13 +451,11 @@ static int run(int argc, char **argv) {
   argc -= optind;
   argv += optind;
 
-  if (o.touch && o.evict) {
-  	fatal("invalid option combination: -t and -e");
-  }
+  if (o.touch && o.evict)
+    fatal("invalid option combination: -t and -e");
 
-  if (o.evict && o.lock) {
+  if (o.evict && o.lock)
     fatal("invalid option combination: -e and -l");
-  }
 
   if (o.lock && o.lockall) fatal("invalid option combination: -l and -L");
 
@@ -547,7 +464,7 @@ static int run(int argc, char **argv) {
     if (!o.wait) {
       o.quiet = 1;
       o.verbose = 0;
-   }
+    }
   }
 
   if (o.wait && !o.daemon) fatal("wait mode must be combined with -d");
@@ -557,7 +474,7 @@ static int run(int argc, char **argv) {
   if (o.pidfile && (!o.lock && !o.lockall)) fatal("pidfile can only be created when -l or -L is specified");
 
   if (!argc && !o.batch) {
-    printf("%s: no files or directories specified\n", prog);
+    std::cout << std::format("{}: no files or directories specified\n", prog);
     usage();
   }
 
@@ -593,7 +510,7 @@ static int run(int argc, char **argv) {
         continue;   // rendered below as the FATAL line
       std::string msg = format_failure(f);
       if (!msg.empty())
-        fprintf(stderr, "vmtouch: WARNING: %s\n", msg.c_str());
+        std::cerr << std::format("vmtouch: WARNING: {}\n", msg);
     }
   }
 
@@ -607,7 +524,7 @@ static int run(int argc, char **argv) {
     // The Fatal record is always stored, never gated.
     for (const Failure& f : rep.failures) {
       if (f.kind == Failure::Kind::Fatal) {
-        fprintf(stderr, "vmtouch: FATAL: %s\n", f.path.c_str());
+        std::cerr << std::format("vmtouch: FATAL: {}\n", f.path);
         break;
       }
     }
@@ -618,7 +535,7 @@ static int run(int argc, char **argv) {
   if (o.lock || o.lockall) {
     if (o.lockall) {
       if (mlockall(MCL_CURRENT))
-        fatal("unable to mlockall (%s)", strerror(errno));
+        fatal(std::format("unable to mlockall ({})", strerror(errno)));
     }
 
     if (o.pidfile) {
@@ -626,7 +543,8 @@ static int run(int argc, char **argv) {
       write_pidfile(o);
     }
 
-    if (!o.quiet) printf("LOCKED %" PRId64 " pages (%s)\n", rep.total_pages, pretty_print_size(total_pages_size));
+    if (!o.quiet)
+      std::cout << std::format("LOCKED {} pages ({})\n", rep.total_pages, pretty_print_size(total_pages_size));
 
     if (o.wait) reopen_all();
 
@@ -637,28 +555,31 @@ static int run(int argc, char **argv) {
 
   if (!o.quiet) {
     if (o.output == NULL) {
-      if (o.verbose) printf("\n");
-      printf("           Files: %" PRId64 "\n", rep.total_files);
-      printf("     Directories: %" PRId64 "\n", rep.total_dirs);
-      if (o.touch)
-        printf("   Touched Pages: %" PRId64 " (%s)\n", rep.total_pages, pretty_print_size(total_pages_size));
-      else if (o.evict)
-        printf("   Evicted Pages: %" PRId64 " (%s)\n", rep.total_pages, pretty_print_size(total_pages_size));
-      else {
-        printf("  Resident Pages: %" PRId64 "/%" PRId64 "  ", rep.total_pages_in_core, rep.total_pages);
-        printf("%s/", pretty_print_size(total_pages_in_core_size));
-        printf("%s  ", pretty_print_size(total_pages_size));
+      if (o.verbose)
+        std::cout << "\n";
+      std::cout << std::format("           Files: {}\n", rep.total_files);
+      std::cout << std::format("     Directories: {}\n", rep.total_dirs);
+      if (o.touch) {
+        std::cout << std::format("   Touched Pages: {} ({})\n", rep.total_pages, pretty_print_size(total_pages_size));
+      } else if (o.evict) {
+        std::cout << std::format("   Evicted Pages: {} ({})\n", rep.total_pages, pretty_print_size(total_pages_size));
+      } else {
+        std::cout << std::format("  Resident Pages: {}/{}  ", rep.total_pages_in_core, rep.total_pages);
+        std::cout << std::format("{}/", pretty_print_size(total_pages_in_core_size));
+        std::cout << std::format("{}  ", pretty_print_size(total_pages_size));
         if (rep.total_pages)
-          printf("%.3g%%", total_pages_in_core_perc);
-        printf("\n");
+          std::cout << std::format("{:.3}%", total_pages_in_core_perc);
+        std::cout << "\n";
       }
-      printf("         Elapsed: %.5g seconds\n", elapsed);
-    } else if (strncmp(o.output, "kv", 2) == 0) {
-      const char *desc = o.touch ? "Touched" :
-                   o.evict ? "Evicted" :
-                             "Resident";
-      printf("Files=%" PRId64 " Directories=%" PRId64 " %sPages=%" PRId64 " TotalPages=%" PRId64 " %sSize=%" PRId64 " TotalSize=%" PRId64 " %sPercent=%.3g Elapsed=%.5g\n", 
-       rep.total_files, rep.total_dirs, desc, rep.total_pages_in_core, rep.total_pages, desc, total_pages_in_core_size, total_pages_size, desc, total_pages_in_core_perc, elapsed);
+      std::cout << std::format("         Elapsed: {:.5} seconds\n", elapsed);
+    } else if (std::string_view(o.output).starts_with("kv")) {
+      const std::string_view desc = o.touch ? "Touched" :
+                                    o.evict ? "Evicted" :
+                                              "Resident";
+      std::cout << std::format(
+          "Files={} Directories={} {}Pages={} TotalPages={} {}Size={} TotalSize={} {}Percent={:.3} Elapsed={:.5}\n",
+          rep.total_files, rep.total_dirs, desc, rep.total_pages_in_core, rep.total_pages,
+          desc, total_pages_in_core_size, total_pages_size, desc, total_pages_in_core_perc, elapsed);
     }
   }
 
@@ -671,7 +592,7 @@ int main(int argc, char **argv) {
   try {
     return run(argc, argv);
   } catch (const FatalError& e) {
-    fprintf(stderr, "vmtouch: FATAL: %s\n", e.what());
+    std::cerr << std::format("vmtouch: FATAL: {}\n", e.what());
     if (daemon_pid == 0 && exit_pipe[1] != -1) {
       const char code = 1;
       const ssize_t ignored [[maybe_unused]] = write(exit_pipe[1], &code, 1);
