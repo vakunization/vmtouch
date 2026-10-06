@@ -24,6 +24,23 @@ bool is_mincore_page_resident(unsigned char mincore_byte);
 // gettimeofday(2) as fractional seconds.
 double now_seconds();
 
+// Semantic kernel release version (major.minor), parsed from uname(2).
+struct KernelVersion {
+    int major = 0;
+    int minor = 0;
+
+    friend bool operator<(const KernelVersion& a, const KernelVersion& b) {
+        return a.major != b.major ? a.major < b.major : a.minor < b.minor;
+    }
+    friend bool operator>=(const KernelVersion& a, const KernelVersion& b) {
+        return !(a < b);
+    }
+};
+
+// Parses "X.Y.Z..." from a uname release string (e.g. "6.9.4-arch1").
+// Stops at the first non-digit segment boundary; missing parts are 0.
+KernelVersion parse_kernel_version(const char* release);
+
 #ifdef __linux__
 // Heuristic for whether mincore(2) reports accurate residency: since
 // kernel 5.2 it only does so when the process has write permission on

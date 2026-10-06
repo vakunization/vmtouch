@@ -8,7 +8,6 @@
 #include <sys/time.h>
 #include <sys/utsname.h>
 #include <unistd.h>
-#include <ctype.h>
 
 #include "common.h"
 
@@ -36,24 +35,27 @@ double now_seconds() {
     return tv.tv_sec + (tv.tv_usec / 1000000.0);
 }
 
+KernelVersion parse_kernel_version(const char* release) {
+    KernelVersion v;
+    if (!release)
+        return v;
+    const char* p = release;
+    v.major = static_cast<int>(strtoul(p, const_cast<char**>(&p), 10));
+    if (*p == '.') {
+        ++p;
+        v.minor = static_cast<int>(strtoul(p, const_cast<char**>(&p), 10));
+    }
+    return v;
+}
+
 #ifdef __linux__
 bool can_do_mincore(const struct stat& st) {
+    constexpr KernelVersion kMincoreAccuracyKernel{5, 2};
+
     struct utsname utsinfo;
     if (uname(&utsinfo) == 0) {
-        unsigned long ver[16] = {};
-        int i = 0;
-        const char* p = utsinfo.release;
-        while (*p) {
-            if (isdigit(static_cast<unsigned char>(*p))) {
-                ver[i] = strtoul(p, const_cast<char**>(&p), 10);
-                i++;
-            } else {
-                p++;
-            }
-        }
-        // kernel < 5.2: mincore is always accurate
-        if (ver[0] < 5 || ver[1] < 2)
-            return true;
+        if (parse_kernel_version(utsinfo.release) < kMincoreAccuracyKernel)
+            return true;   // kernel < 5.2: mincore is always accurate
     }
 
     uid_t uid = getuid();
