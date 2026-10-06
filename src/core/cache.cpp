@@ -4,9 +4,9 @@
 
 #include <cerrno>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <vector>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -132,15 +132,13 @@ vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok)
 
 // Counts resident pages in the mapped range. The retry_op result is
 // checked: on failure the caller gets Failed{MincoreFailed} rather than a
-// count derived from an unwritten array.
+// count derived from an unwritten buffer.
 vmt::Result<int64_t> mincore_count(const Mapping& m) {
-    auto* mincore_array = static_cast<unsigned char*>(malloc(m.pages_in_range));
-    if (mincore_array == NULL)
-        throw FatalError(std::string("Failed to allocate memory for mincore array (") + strerror(errno) + ")");
+    std::vector<unsigned char> mincore_array(m.pages_in_range);
 
     int err = 0;
     if (!retry_op("mincore", [&] {
-            return mincore(m.region.mem(), m.len_of_range, mincore_array);
+            return mincore(m.region.mem(), m.len_of_range, mincore_array.data());
         }, err))
         return vmt::Result<int64_t>::Error(Failure{Failure::Kind::MincoreFailed, err, "", 0});
 
@@ -150,7 +148,6 @@ vmt::Result<int64_t> mincore_count(const Mapping& m) {
             pages_resident++;
     }
 
-    free(mincore_array);
     return vmt::Result<int64_t>::Ok(pages_resident);
 }
 
