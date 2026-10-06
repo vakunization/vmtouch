@@ -1,10 +1,4 @@
 // core/common.h — shared types for the vmtouch core library and CLI.
-//
-// Introduced by commit 2 ("common-types") as a pure move from the monolith:
-// the structs are byte-for-byte the ones that used to live at the top of
-// src/vmtouch.cpp. Status and FatalError are defined here from the start so
-// commit 3 (diagnostics) can use them; nothing in the C-transplanted code
-// references them yet.
 
 #pragma once
 
@@ -20,63 +14,48 @@
 
 inline constexpr const char* VMTOUCH_VERSION = "1.3.1";
 
-// Set once at startup by the CLI (platform::init() in commit 3).
+// Set once at startup by the CLI (platform::init()).
 extern long pagesize;
 
-// Per-file selection range (from -p). Was "struct FileInfo" in the monolith;
-// its `char* path` member was dead (never read or written) and is dropped.
+// Per-file selection range (from -p). {0,0} = whole file.
 struct FileInfoRange {
     int64_t offset = 0;
     int64_t max_len = 0;
 };
 
-/*
- * To find out if the stat results from a single file correspond to a file we
- * have already seen, we need to compare both the device and the inode
- */
+// Identity of an already-seen file (hardlink dedup).
 struct dev_and_inode {
     dev_t dev;
     ino_t ino;
 };
 
+// Library-level call policy. The CLI keeps all its own state separately.
 struct Options {
-    // B5 (spec2 §2.1, final): the library-level Options — nothing else.
-    // The CLI owns all its own state locally (quiet/verbose/output/daemon/
-    // pidfile/batch), never in the library's Options.
     enum class Verb { Inspect, Warm, Evict, Lock };
     Verb verb = Verb::Inspect;
     FileInfoRange range{};               // {0,0} = whole file
-    size_t max_file_size = SIZE_MAX;
-    bool collect_failures = false;
+    size_t max_file_size = SIZE_MAX;     // files larger are policy-skipped
+    bool collect_failures = false;       // gate Report.failures (except Fatal)
 };
 
 // Result codes returned by core entry points (cache/session).
 enum class Status : int32_t {
     Ok = 0,        // call completed; per-file problems are in the Report
-    Skipped = 1,   // process_fd only (B4): the file was skipped — see Report
-    Fatal = 2,     // traversal interrupted (FatalError caught at the boundary);
-                   // the Report holds everything accumulated + the Fatal record
+    Skipped = 1,   // reserved (not produced)
+    Fatal = 2,     // traversal interrupted; Report holds everything + the Fatal record
 };
 
-// Fatal operation error: thrown where continuing is pointless (mlock
-// failure, allocation failure, ...). The CLI's single top-level handler
-// prints "vmtouch: FATAL: <msg>" and exits 1 — the library itself never
-// exits (defined in commit 3, used by core from then on).
+// Error that stops the whole traversal (allocation failure, misaligned
+// mmap, unsupported platform). Caught at the Session boundary; the CLI
+// prints "vmtouch: FATAL: <msg>" and exits 1. The library never exits.
 class FatalError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
-// LEGACY (removed in A2): the pre-A1 string-warning type.
-// A1 kept it only so the Session constructor signature compiled during the
-// transition; A2 removed the constructor parameter and this alias.
-
-// ---------------------------------------------------------------------------
-// Structured failures (A1): the library reports FACTS, not strings. The CLI
-// formats them at print time; embedders (S1: "error codes I can log") read
-// them directly. C-shape note: Kind values are explicit and frozen — the
-// Phase-3 C enum maps 1:1.
-// ---------------------------------------------------------------------------
+// One recorded failure. The library reports facts; the CLI formats text.
+// Kind values are frozen — the Phase-3 C enum maps 1:1. Additions are
+// allowed; renumbering is not.
 struct Failure {
     enum class Kind : int32_t {
         Open = 1,             // unable to open
@@ -89,33 +68,22 @@ struct Failure {
         SeparateFs = 8,       // -F: not recursing into other filesystem
         CrawlLoop = 9,        // symbolic link loop detected
         PathTooLong = 10,     // path exceeds PATH_MAX
-        MincoreInaccurate = 11, // RESERVED (kernel >= 5.2 heuristic) — not produced since the spec migration
+        MincoreInaccurate = 11, // RESERVED (kernel >= 5.2 heuristic) — not produced
         EvictFailed = 12,     // legacy umbrella — not produced (18/19 supersede)
         Closedir = 13,        // unable to closedir
-        // --- A1-drift fix (commit following A2): upstream renders these
-        // five failure SITES with their own texts; the coarse kinds above
-        // cannot reproduce them. New values only — the frozen 13 keep
-        // their numbers (Phase-3 C enum maps 1:1).
         FstatFailed = 14,     // unable to fstat PATH (ERR), skipping
         IoctlSizeFailed = 15, // unable to ioctl PATH (ERR), skipping
         OpendirFailed = 16,   // unable to opendir PATH (ERR), skipping
         MunmapFailed = 17,    // unable to munmap file PATH (ERR)
         EvictAdviseFailed = 18,     // unable to posix_fadvise file PATH (ERR)
         EvictInvalidateFailed = 19, // unable to msync invalidate file PATH (ERR)
-        Fatal = 20,           // TERMINAL: traversal stopped (mlock/mincore fatal,
-                              // depth, allocation, platform). err/path describe the site.
-        // --- 2026-10-05 adjudication (bugs.md DEV-1/DEV-2): the mlock/
-        // mincore FATAL freeze was overturned — these failures become
-        // per-file Failed records. New values only; 1-20 keep their
-        // numbers (Phase-3 C enum maps 1:1).
-        MlockFailed = 21,     // mlock failed (upstream text: mlock: PATH (ERR);
-                              // R2: Failed in every case, retry_op never throws)
-        MincoreFailed = 22,   // mincore failed (BUG-1 fix: retry_op result is
-                              // checked; R2 makes retryable-after-N Failed too)
+        Fatal = 20,           // traversal stopped; the message rides in `path`
+        MlockFailed = 21,     // mlock failed (per-file Failed, traversal continues)
+        MincoreFailed = 22,   // mincore failed (per-file Failed)
     };
     Kind        kind;
     int32_t     err = 0;    // errno, 0 if not applicable
-    std::string path;       // empty for fd-based ops
+    std::string path;       // empty for fd-based ops; the message text for Fatal
     int64_t     offset = 0; // for range problems (BeyondEof)
 };
 

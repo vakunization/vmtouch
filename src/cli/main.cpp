@@ -116,10 +116,8 @@ void usage() {
   exit(1);
 }
 
-// Fatal situations no longer exit() here: the library/CLI code throws
-// FatalError and main()'s single handler prints the message, sends the
-// daemon exit signal and exits 1. Message text is byte-identical to the
-// old exit-based fatal().
+// Fatal situations no longer exit() here: the code throws FatalError and
+// main()'s single handler prints the message and exits 1.
 static void fatal(const char *fmt, ...) {
   va_list ap;
   char buf[4096];
@@ -146,9 +144,8 @@ static void warning(const char *fmt, bool quiet, ...) {
   if (!quiet) fprintf(stderr, "vmtouch: WARNING: %s\n", buf);
 }
 
-// A1: convert a structured Failure record to the historical warning text.
-// Byte-identical to the strings the monolith built at each site. The
-// library never sees these strings.
+// Converts a structured Failure record to the historical warning text.
+// The library never sees these strings.
 static std::string format_failure(const Failure& f) {
   switch (f.kind) {
     case Failure::Kind::Open:
@@ -188,20 +185,14 @@ static std::string format_failure(const Failure& f) {
     case Failure::Kind::EvictInvalidateFailed:
       return "unable to msync invalidate file " + f.path + " (" + strerror(f.err) + ")";
     case Failure::Kind::MlockFailed:
-      // New kind (2026-10-05 adjudication): rendered with the upstream
-      // monolith's text (vmtouch.c: fatal("mlock: %s (%s)", path, ...)),
-      // now a per-file warning instead of a traversal-stopping fatal.
+      // Historical text (a fatal there; a warning here).
       return "mlock: " + f.path + " (" + strerror(f.err) + ")";
     case Failure::Kind::MincoreFailed:
-      // New kind (2026-10-05 adjudication): mincore failures were always
-      // fatal before, so there is no upstream text to reproduce.
+      // No upstream text exists: mincore failure was always fatal there.
       return "unable to mincore file " + f.path + " (" + strerror(f.err) + ")";
     case Failure::Kind::Fatal:
-      // Terminal record (B2): rendered as the historical FATAL text. The
-      // fatal sites are few and known (mlock/mincore/misaligned-mmap/
-      // depth/allocation/platform); the message text already carries the
-      // site formatting from the engine. B4/B5 wire this to the FATAL
-      // line + exit 1.
+      // Terminal record: rendered as the FATAL text. The message text
+      // already carries the site formatting from the engine.
       return f.path.empty()
                  ? std::string(strerror(f.err))
                  : f.path + " (" + strerror(f.err) + ")";
@@ -353,9 +344,8 @@ void parse_range(char *inp, FileInfoRange& f) {
 }
 
 
-// -i/-I (B3): the filters are REMOVED from the library (ratified spec);
-// the flags stay getopt-accepted until B5 deletes them and are parsed
-// into the void. No fatal caps anymore — nothing to enforce them on.
+// -i/-I filters are gone; these stubs remain only to keep the getopt
+// switch shape simple.
 void parse_ignore_item(const char * /*inp*/, Options& /*o*/) {}
 void parse_filename_filter_item(const char * /*inp*/, Options& /*o*/) {}
 
@@ -400,24 +390,18 @@ void print_page_residency_chart(FILE *out, char *mincore_array, int64_t pages_in
 
 
 #ifdef __linux__
-// Moved verbatim to core/platform.cpp as platform::can_do_mincore().
+// (can_do_mincore lives in core/platform.cpp.)
 #endif
 
 
-// B2 interim: the library-side sink layer is REMOVED (verbs return data;
-// no events). Per-file -v output (path echo + chart) is gone; the totals-
-// only CLI rewrite + run.sh rebuild land in B5/B6 per the ratified spec.
 static std::unique_ptr<Session> g_session;
 
 
 
 
 // Batch driver (-b): reads paths separated by newline or NUL (-0) from a
-// list file or stdin ("-") and processes each. This is input-driving, i.e. a
-// CLI concern: the library only ever sees process() per path. Deliberately
-// kept OUT of src/core (no fopen under core — success criterion).
-// B4: batch paths accumulate into `extra` — the CLI makes ONE process()
-// call with all roots (argv + batch), preserving cross-root dedup.
+// list file or stdin ("-") and accumulates them into `extra`. Input-
+// driving is a CLI concern: the library only ever sees process() per path.
 static void read_batch_paths(const CliOptions& o, std::vector<std::string>& extra) {
   FILE* f;
   char* line = NULL;
@@ -476,9 +460,8 @@ static void write_pidfile(CliOptions& o) {
 }
 
 // Signal handlers must be void(int), so the pidfile cleanup handler needs
-// one narrow file-scope pointer. It is assigned only here, immediately
-// before sigaction registration, and only when -P is in use — replacing the
-// old never-assigned o_ptr (null deref on every fatal path, caught by UBSan).
+// one narrow file-scope pointer. Assigned only immediately before
+// sigaction registration, and only when -P is in use.
 static const CliOptions* g_pidfile_options = nullptr;
 
 static void signal_handler_clear_pidfile(int) {
@@ -508,7 +491,7 @@ static int run(int argc, char **argv) {
   struct timeval start_time;
   struct timeval end_time;
 
-  CliOptions o;          // CLI-level state (B5: no longer rides on core Options)
+  CliOptions o;          // CLI-level state (never rides on core Options)
   Options lib_opts;      // the library's Options (verb/range/max_file_size/collect)
   FileInfoRange f;
 
@@ -517,8 +500,8 @@ static int run(int argc, char **argv) {
 
   platform::init();
 
-  // B5: -f/-F/-h/-i/-I are GONE (fixed traversal policy per the ratified
-  // spec; getopt rejects them as unknown options -> usage).
+  // -f/-F/-h/-i/-I are gone: traversal policy is fixed, the flags are
+  // rejected as unknown options (-> usage).
   while((ch = getopt(argc, argv, "tevqlLd0p:b:m:P:wo:")) != -1) {
     switch(ch) {
       case '?': usage(); break;
@@ -579,18 +562,17 @@ static int run(int argc, char **argv) {
   }
 
   // Session created AFTER option parsing/validation so it holds the final
-  // library Options (B5: verb/range/max_file_size/collect_failures — CLI
-  // state lives in CliOptions now). ONE process() call carries all roots
-  // (argv + batch): cross-root dedup + one Report.
+  // library Options. ONE process() call carries all roots (argv + batch):
+  // cross-root dedup + one Report.
   lib_opts.range = f;
   lib_opts.collect_failures = true;   // the CLI drains records (quiet gates printing)
   if (o.touch) lib_opts.verb = Options::Verb::Warm;
   if (o.evict) lib_opts.verb = Options::Verb::Evict;
   if (o.lock)  lib_opts.verb = Options::Verb::Lock;
-  if (o.lockall) lib_opts.verb = Options::Verb::Warm;   // ratified: -L -> Warm; CLI mlockalls after
+  if (o.lockall) lib_opts.verb = Options::Verb::Warm;   // -L -> Warm; mlockall below
   g_session = std::make_unique<Session>(lib_opts);
 
-  // Must be done now because mlock() not inherited across fork()
+  // Must happen before fork(): mlock() is not inherited across fork().
   if (o.daemon) go_daemon(o);
 
   gettimeofday(&start_time, NULL);
@@ -622,7 +604,7 @@ static int run(int argc, char **argv) {
   double  elapsed                  = (end_time.tv_sec - start_time.tv_sec) + (double)(end_time.tv_usec - start_time.tv_usec)/1000000.0;
 
   if (st == Status::Fatal) {
-    // The Fatal record IS the reason (always stored, never gated).
+    // The Fatal record is always stored, never gated.
     for (const Failure& f : rep.failures) {
       if (f.kind == Failure::Kind::Fatal) {
         fprintf(stderr, "vmtouch: FATAL: %s\n", f.path.c_str());
@@ -685,9 +667,7 @@ static int run(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   // Single fatal handler for the whole program: FatalError thrown anywhere
-  // (option parsing, crawl, cache ops) lands here. Byte-identical output to
-  // the old exit-based fatal(): "vmtouch: FATAL: <msg>\n" + daemon exit
-  // signal + status 1.
+  // (option parsing, crawl, cache ops) lands here.
   try {
     return run(argc, argv);
   } catch (const FatalError& e) {

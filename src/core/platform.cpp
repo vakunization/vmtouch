@@ -13,7 +13,7 @@
 #include "common.h"
 
 // Definition of the global declared in core/common.h. Lives in the library
-// (not the CLI) so the core links standalone. Set by platform::init().
+// so the core links standalone. Set by platform::init().
 long pagesize = 4096;
 
 namespace platform {
@@ -37,8 +37,6 @@ double now_seconds() {
 }
 
 #ifdef __linux__
-// Verbatim port of upstream can_do_mincore(): parse the kernel release and
-// check write permission for kernel >= 5.2.
 bool can_do_mincore(const struct stat& st) {
     struct utsname utsinfo;
     if (uname(&utsinfo) == 0) {
@@ -53,7 +51,7 @@ bool can_do_mincore(const struct stat& st) {
                 p++;
             }
         }
-        // kernel < 5.2
+        // kernel < 5.2: mincore is always accurate
         if (ver[0] < 5 || ver[1] < 2)
             return true;
     }

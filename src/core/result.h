@@ -1,15 +1,11 @@
-// core/result.h — the minimal Result<T> used across the library (B1).
+// core/result.h — the minimal Result<T> used across the library.
 //
-// One error language (spec2 principle 4): Ok carries the value; Error
-// carries a Failure (the expected-outcome record); exceptional situations
-// are NOT carried here — they throw FatalError.
-//
-// Hand-rolled on purpose: std::expected would pull C++23. The storage is
-// std::optional<T> (engages only on Ok) — move-only types like FileHandle
-// work naturally, no default construction required. Invariants:
-//   * is_ok()  <=> value_ engaged;
-//   * accessing the wrong side is a programming error (assert in debug);
-//   * Result<void> carries no value, only the Failure on Error.
+// One error language: Ok carries the value; Error carries a Failure.
+// Exceptional situations are not carried here — they throw FatalError.
+// Hand-rolled instead of std::expected to stay C++20. The storage is
+// std::optional<T> (engages only on Ok), so move-only types like
+// FileHandle work without default construction. Accessing the wrong
+// side is a programming error (assert in debug).
 
 #pragma once
 
@@ -30,7 +26,6 @@ public:
     bool is_ok() const { return value_.has_value(); }
     bool is_error() const { return !value_.has_value(); }
 
-    // Unchecked on the wrong side (documented contract; debug asserts).
     T& value() {
         assert(value_.has_value());
         return *value_;

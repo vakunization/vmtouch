@@ -1,20 +1,18 @@
-// core/cache.h — page-cache verbs on an open file descriptor (spec2 §7).
+// core/cache.h — page-cache verbs on an open file descriptor.
 //
-// Four free functions over an already-open fd; the ONLY place where
-// page-cache syscalls live. No path, no sinks, no CLI concepts.
+// Four free functions over an already-open fd; the only place where
+// page-cache syscalls live. No path, no CLI concepts.
 //
-// Return contract (one error language; R2 + DEV-1/DEV-2 adjudications,
-// 2026-10-05):
-//   * Ok   -> Result::Ok(VerbOutcome) — stats always; region ONLY for lock
-//             (inspect/warm/evict munmap inside themselves before return);
-//   * Fail -> Result::Error(Failure) — kind from §8.1 (as amended: Kind 21
-//             MlockFailed, Kind 22 MincoreFailed), err = the syscall's error
-//             code, path EMPTY (the caller attaches the path). ANY syscall
-//             failure is a per-file Failed — non-retryable AND
-//             retryable-after-N (3×50ms, EINTR/EAGAIN/EBUSY) alike;
-//             traversal continues;
-//   * Fatal-> throw FatalError — infrastructure only: allocation failure,
-//             misaligned mmap, unsupported platform. Traversal stops.
+// Return contract:
+//   * Ok    -> Result::Ok(VerbOutcome) — stats always; region ONLY for lock
+//              (inspect/warm/evict munmap inside themselves before return);
+//   * Fail  -> Result::Error(Failure) — err = the syscall's error code,
+//              path EMPTY (the caller attaches the path). Any syscall
+//              failure is a per-file Failed — non-retryable and
+//              retryable-after-N (3x50ms, EINTR/EAGAIN/EBUSY) alike;
+//              traversal continues;
+//   * Fatal -> throw FatalError — infrastructure only: allocation failure,
+//              misaligned mmap, unsupported platform. Traversal stops.
 //
 // Empty file: silent Ok with zero stats and no region (no record).
 
@@ -30,27 +28,24 @@
 
 namespace cache {
 
-// Caller policy per call (spec2 §2.9): assembled by the Session from its
-// Options. cache::* knows nothing about Options.
+// Caller policy per call, assembled by the Session from its Options.
 struct Params {
     FileInfoRange range;                    // -p: offset / max_len (0 = to EOF)
-    size_t max_file_size = SIZE_MAX;        // -m (upstream default: unlimited)
+    size_t max_file_size = SIZE_MAX;        // -m (SIZE_MAX = unlimited)
 };
 
-// What to do with the mapped pages. FROZEN values (C ABI): see
-// docs/vocabulary.md. The verb × fd functions below implement these.
+// What to do with the mapped pages. Values are frozen (C ABI).
 enum class Verb : int32_t {
-    Inspect = 1,   // query residency (no -t/-e/-l)
+    Inspect = 1,   // query residency
     Warm    = 2,   // -t: touch pages into cache
     Evict   = 3,   // -e: drop pages from cache
     Lock    = 4,   // -l: touch + mlock, mapping kept
 };
 
-// ---------------------------------------------------------------------------
-// MappedRegion: owning handle for a live mmap region (spec2 §2.11).
-// Move-only; destructor munmaps if live; unmap(int&) is an explicit early
-// munmap, idempotent, returns false + errno on failure (region cleared).
-// ---------------------------------------------------------------------------
+// Owning handle for a live mmap region. Move-only; the destructor munmaps
+// if live. unmap() is an explicit early munmap: it clears the handle only
+// on success, so a failed call can be retried and the destructor still
+// owns the mapping.
 class MappedRegion {
 public:
     MappedRegion() = default;
@@ -83,17 +78,14 @@ public:
     int64_t len() const { return len_; }
     explicit operator bool() const { return mem_ != nullptr; }
 
-    // Explicit early munmap (MISS-1 / unmap option (a), 2026-10-05):
-    // the handle is cleared ONLY on success — on failure the region stays
-    // live so a subsequent unmap() genuinely re-attempts munmap (the retry
-    // in unmap_or_fail works), and the destructor makes a final attempt.
-    // Idempotent after success: a second call is a no-op returning true.
+    // Explicit early munmap. Idempotent after success; on failure returns
+    // false + errno and the region stays live.
     bool unmap(int& err) {
         if (!mem_)
             return true;
         if (munmap(mem_, len_) != 0) {
             err = errno;
-            return false;   // region intentionally NOT cleared on failure
+            return false;
         }
         err = 0;
         mem_ = nullptr;
@@ -106,7 +98,7 @@ private:
     int64_t len_ = 0;
 };
 
-// Ok payload (spec2 §2.10): stats for all four verbs; region only for lock.
+// Ok payload: stats for all four verbs; region only for lock.
 struct VerbOutcome {
     Stats stats;
     MappedRegion region;   // Lock only; empty otherwise

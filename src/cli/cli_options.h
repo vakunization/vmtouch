@@ -1,9 +1,7 @@
-// core/cli_options.h — the CLI's OWN option state (B5).
+// core/cli_options.h — the CLI's own option state.
 //
-// Spec rule: "the library knows nothing about the CLI." The interim CLI
-// fields rode on core Options through B4; B5 moves them here, where they
-// belong. Daemon/pidfile/batch/wait/output/quiet/verbose are CLI-level
-// concerns (process management + output policy), never library state.
+// Daemon/pidfile/batch/wait/output/quiet/verbose are CLI-level concerns
+// (process management + output policy), never library state.
 
 #pragma once
 
@@ -18,7 +16,7 @@ struct CliOptions {
 
     // Output policy.
     bool quiet = false;      // -q
-    int verbose = 0;         // -v (accepted; totals-only per the ratified spec)
+    int verbose = 0;         // -v (accepted; totals-only)
     const char* output = nullptr;   // -o (only "kv")
 
     // Process management.

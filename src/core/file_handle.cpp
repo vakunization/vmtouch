@@ -1,8 +1,4 @@
 // core/file_handle.cpp — see file_handle.h.
-//
-// The open/retry loop is transplanted verbatim from Session::process_file
-// (Increment-1 semantics preserved): same flag fallback, same rlimit
-// retry, same fatal texts for the rlimit outcomes.
 
 #include "file_handle.h"
 
@@ -17,9 +13,7 @@
 namespace vmt {
 namespace {
 
-// Translates the rlimit outcome into the monolith's exact fatal messages.
-// (Same text the session used before the extraction — B1 is behavior-
-// preserving by construction.)
+// Translates the failed rlimit raise into the historical fatal messages.
 [[noreturn]] void throw_nofile_fatal(const platform::RaiseNofileResult& res) {
     switch (res.outcome) {
         case platform::RaiseNofileResult::Outcome::GetrlimitFailed:
@@ -53,7 +47,7 @@ Result<FileHandle> FileHandle::open(const std::string& path) {
 
 #if defined(O_NOATIME)
         if (errno == EPERM && (open_flags & O_NOATIME)) {
-            open_flags &= ~O_NOATIME;   // owned by someone else: retry without O_NOATIME
+            open_flags &= ~O_NOATIME;   // owned by someone else: drop O_NOATIME
             continue;
         }
 #endif
@@ -64,7 +58,7 @@ Result<FileHandle> FileHandle::open(const std::string& path) {
         const auto res = platform::raise_nofile_rlimit();
         if (res.outcome != platform::RaiseNofileResult::Outcome::Raised)
             throw_nofile_fatal(res);
-        // limit raised: retry the open immediately
+        // limit raised: retry the open
     }
 
     return Result<FileHandle>::Error(Failure{Failure::Kind::Open, errno, path, 0});

@@ -1,15 +1,4 @@
-// core/cache.cpp — see cache.h (spec2 §7).
-//
-// Structure: one shared prelude (fstat -> block-device size -> empty ->
-// -m -> range -> mmap -> alignment), then the per-verb body. Syscalls are
-// wrapped by retry_op(): 3 attempts, 50 ms, only EINTR/EAGAIN/EBUSY;
-// retryable-after-N on mmap/munmap/mincore/mlock/fadvise/msync is FATAL
-// (spec2 §8.3) — non-retryable errors become Result::Error(Failure).
-//
-// The control flow (ranges, page math, the volatile touch-read loop that
-// IS the feature, the -l keep-mapping rule) is unchanged from the
-// pre-migration engine; what changed is the reporting surface: no paths,
-// no sinks, no progress events (spec §7.3: cache knows fd + Params only).
+// core/cache.cpp — see cache.h.
 
 #include "cache.h"
 
@@ -36,34 +25,31 @@
 namespace cache {
 namespace {
 
-constexpr int kRetryAttempts = 3;                  // spec2 §7.11
+constexpr int kRetryAttempts = 3;
 constexpr int kRetrySleepMs = 50;
 
 bool is_retryable(int err) {
-    return err == EINTR || err == EAGAIN || err == EBUSY;   // spec2 §8.3
+    return err == EINTR || err == EAGAIN || err == EBUSY;
 }
 
 int64_t bytes2pages(int64_t bytes) {
     return (bytes + pagesize - 1) / pagesize;
 }
 
-// Runs one syscall with the retry policy. `call` returns 0 on success,
-// nonzero on failure; out_err receives the error code (errno, or the
-// call's own return value for errno-less calls like posix_fadvise —
-// MISS-2). R2 adjudication (2026-10-05): retryable-after-N is a per-file
-// Failed, NOT a fatal — this helper NEVER throws. cache::* throws
-// FatalError only for infrastructural causes (allocation, misaligned
-// mmap, unsupported platform).
+// Runs one syscall with the retry policy. `call` returns 0 on success and
+// nonzero on failure. out_err receives the error code (errno, or the call's
+// own return value routed through errno for errno-less calls such as
+// posix_fadvise). Never throws: retryable-after-N is reported as a failure.
 template <typename Call>
-bool retry_op(const char* /*fatal_what*/, Call&& call, int& out_err) {
+bool retry_op(const char* /*label*/, Call&& call, int& out_err) {
     int err = 0;
     for (int attempt = 0; attempt < kRetryAttempts; ++attempt) {
-        errno = 0;   // each attempt classifies its own errno (MISS-2)
+        errno = 0;   // each attempt classifies its own errno
         if (call() == 0) {
             out_err = 0;
             return true;
         }
-        err = errno;   // errno-less calls must return their code via errno
+        err = errno;
         if (!is_retryable(err))
             break;
         if (attempt + 1 < kRetryAttempts)
@@ -73,20 +59,19 @@ bool retry_op(const char* /*fatal_what*/, Call&& call, int& out_err) {
     return false;
 }
 
-// Internal working state shared by the prelude and the verbs.
+// Working state shared by the prelude and the verbs.
 struct Mapping {
     MappedRegion region;
-    struct stat st = {};        // prelude fstat: permission heuristic site
+    struct stat st = {};        // fstat result (permission heuristic input)
     int64_t len_of_file = 0;
     int64_t len_of_range = 0;
     int64_t pages_in_range = 0;
 };
 
-// Prelude (spec2 §7.6). Outcomes:
-//   * empty file -> skipped_ok = true, Ok (caller returns silent Ok);
-//   * Failure    -> Error record (path empty);
-//   * fatal      -> throws (platform).
-// Returns Ok (mapping established, m filled) or Error.
+// Common steps before a verb: fstat, block-device size, empty-file and
+// max-size gates, range selection, mmap and alignment check. Returns Ok
+// with the mapping established, or Error for a per-file failure.
+// skipped_ok is set for an empty file (silent Ok, no record).
 vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok) {
     skipped_ok = false;
     int err = 0;
@@ -108,14 +93,14 @@ vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok)
     }
 
     if (m.len_of_file == 0) {
-        skipped_ok = true;      // empty: silent Ok, no record (spec2 §7.13)
+        skipped_ok = true;      // empty: silent Ok, no record
         return vmt::Result<void>::Ok();
     }
 
     if (static_cast<uint64_t>(m.len_of_file) > p.max_file_size)
         return vmt::Result<void>::Error(Failure{Failure::Kind::TooLarge, 0, "", 0});
 
-    // ---- range selection (verbatim) --------------------------------------
+    // ---- range selection --------------------------------------------------
 
     if (p.range.max_len > 0 && (p.range.offset + p.range.max_len) < m.len_of_file) {
         m.len_of_range = p.range.max_len;
@@ -127,8 +112,6 @@ vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok)
 
     // ---- map --------------------------------------------------------------
 
-    // DEV-3 (R2): mmap goes through retry_op like every other syscall.
-    // Non-retryable AND retryable-after-N -> Failed{Map}; no throw.
     void* mem = MAP_FAILED;
     int map_err = 0;
     if (!retry_op("mmap", [&] {
@@ -137,7 +120,7 @@ vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok)
         }, map_err))
         return vmt::Result<void>::Error(Failure{Failure::Kind::Map, map_err, "", 0});
 
-    if (!platform::aligned_p(mem)) {   // infrastructure: fatal (spec2 §8.3)
+    if (!platform::aligned_p(mem)) {   // infrastructure failure
         munmap(mem, m.len_of_range);
         throw FatalError("mmap wasn't page aligned");
     }
@@ -147,12 +130,9 @@ vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok)
     return vmt::Result<void>::Ok();
 }
 
-// mincore pass: counts residency. BUG-1 fix (2026-10-05): the retry_op
-// result IS checked — on failure (non-retryable AND retryable-after-N per
-// the R2 adjudication) the verb returns Failed{MincoreFailed} instead of
-// counting residency from an uninitialized array. FatalError is gone from
-// this path entirely (DEV-2 adjudication). Scope: inspect only — DEC-4(a)
-// removed the mincore call from warm/lock (landing in the cleanup commit).
+// Counts resident pages in the mapped range. The retry_op result is
+// checked: on failure the caller gets Failed{MincoreFailed} rather than a
+// count derived from an unwritten array.
 vmt::Result<int64_t> mincore_count(const Mapping& m) {
     auto* mincore_array = static_cast<unsigned char*>(malloc(m.pages_in_range));
     if (mincore_array == NULL)
@@ -174,9 +154,8 @@ vmt::Result<int64_t> mincore_count(const Mapping& m) {
     return vmt::Result<int64_t>::Ok(pages_resident);
 }
 
-// The volatile touch-read loop — reading the first byte of every page IS
-// the feature (kept by decision; see the pre-migration history for why the
-// accumulator is explicitly read back).
+// Reads the first byte of every page; this access IS the feature (it faults
+// pages in). The accumulator is read back so the loop is not optimized away.
 void touch_pages(const Mapping& m) {
     volatile uint64_t j = 0;
     for (int64_t i = 0; i < m.pages_in_range; i++)
@@ -185,13 +164,9 @@ void touch_pages(const Mapping& m) {
     static_cast<void>(touched);
 }
 
-// munmap inside the verb for inspect/warm/evict (spec2 §7.12). MISS-1 fix
-// (unmap option (a), 2026-10-05): unmap() clears the handle only on
-// success, so the retry below genuinely re-attempts munmap (previously the
-// first failure cleared the handle and every "retry" trivially succeeded).
-// R2: failure after retry is a per-file Failed{MunmapFailed}, not a fatal;
-// the (still live) region is then released by MappedRegion's destructor —
-// no leak, no double-unmap.
+// Unmaps a region inside a verb. unmap() clears the handle only on
+// success, so the retry genuinely re-attempts; on failure the still-live
+// region is released by the destructor.
 bool unmap_or_fail(MappedRegion& region, int& err) {
     return retry_op("munmap", [&] { return region.unmap(err) ? 0 : -1; }, err);
 }
@@ -199,7 +174,7 @@ bool unmap_or_fail(MappedRegion& region, int& err) {
 } // namespace
 
 // ---------------------------------------------------------------------------
-// The four verbs (spec2 §7.7 - §7.10).
+// The four verbs.
 // ---------------------------------------------------------------------------
 
 vmt::Result<VerbOutcome> inspect(int fd, const Params& p) {
@@ -233,12 +208,9 @@ vmt::Result<VerbOutcome> warm(int fd, const Params& p) {
 
     touch_pages(m);
 
-    // DEC-4(a): no mincore pass here — all pages are touched by definition,
-    // so residency equals the page count (the redundant mincore syscall and
-    // its discarded result are gone).
     VerbOutcome out;
     out.stats.total_pages = m.pages_in_range;
-    out.stats.total_pages_in_core = m.pages_in_range;   // all touched (spec2 §7.8, as amended)
+    out.stats.total_pages_in_core = m.pages_in_range;   // all pages touched
     int munmap_err = 0;
     if (!unmap_or_fail(m.region, munmap_err))
         return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::MunmapFailed, munmap_err, "", 0});
@@ -255,9 +227,8 @@ vmt::Result<VerbOutcome> evict(int fd, const Params& p) {
 
     int err = 0;
 #if defined(__linux__) || defined(__hpux)
-    // MISS-2: posix_fadvise RETURNS the error code and does not set errno.
-    // The lambda routes its return value through errno (zeroed by retry_op
-    // before each attempt) so classification and Failure.err are correct.
+    // posix_fadvise returns the error code and does not set errno, so the
+    // lambda routes its return value through errno for classification.
     const bool ok = retry_op("posix_fadvise", [&] {
         const int rc = posix_fadvise(fd, p.range.offset, m.len_of_range, POSIX_FADV_DONTNEED);
         if (rc != 0)
@@ -294,19 +265,13 @@ vmt::Result<VerbOutcome> lock(int fd, const Params& p) {
 
     touch_pages(m);   // -l implies touch
 
-    // DEC-4(a): no mincore pass — same rationale as warm.
-
-    // DEV-1 adjudication (2026-10-05): the FATAL freeze is overturned.
-    // mlock failure -> Failed{MlockFailed}; traversal continues. R2 makes
-    // this true for the retryable-after-N path as well (retry_op no longer
-    // throws).
     int err = 0;
     if (!retry_op("mlock", [&] {
             return mlock(m.region.mem(), m.len_of_range);
         }, err))
         return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::MlockFailed, err, "", 0});
 
-    // NO munmap: the region is handed to the caller (spec2 §7.10).
+    // No munmap: the region is handed to the caller and stays mapped.
     VerbOutcome out;
     out.stats.total_pages = m.pages_in_range;
     out.stats.total_pages_in_core = m.pages_in_range;

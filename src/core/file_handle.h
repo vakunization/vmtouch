@@ -1,15 +1,5 @@
-// core/file_handle.h — RAII owner of an open fd; the ONLY place where the
-// open logic lives (B1, per spec2 §6).
-//
-// Open algorithm (verbatim semantics from the Session code this extracts):
-//   1. O_RDONLY | O_NOATIME (when available);
-//   2. EPERM with O_NOATIME -> retry once without the flag;
-//   3. ENFILE/EMFILE -> platform::raise_nofile_rlimit + retry; a failed
-//      raise becomes the corresponding FatalError (historical text);
-//   4. anything else -> Result::Error(Failure{Kind::Open, errno, path}).
-//
-// Knows: path, fd, open logic.  Does not know: the verb, Session, Report,
-// cache::* (spec2 knowledge map).
+// core/file_handle.h — RAII owner of an open fd; the only place where
+// the open logic lives.
 
 #pragma once
 
@@ -24,6 +14,10 @@ namespace vmt {
 
 class FileHandle {
 public:
+    // Opens the path with O_RDONLY | O_NOATIME. On EPERM retries without
+    // O_NOATIME; on ENFILE/EMFILE raises RLIMIT_NOFILE and retries (a
+    // failed raise becomes FatalError). Any other error is
+    // Failure{Kind::Open, errno, path}.
     static Result<FileHandle> open(const std::string& path);
 
     FileHandle(FileHandle&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }

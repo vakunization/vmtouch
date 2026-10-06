@@ -1,17 +1,8 @@
-// core/crawl.cpp — see crawl.h (spec2 §5).
+// core/crawl.cpp — see crawl.h.
 //
-// The traversal logic is transplanted verbatim from the monolith's
-// vmtouch_crawl() (through the Increment-1 Crawler): trailing-slash strip,
-// lstat, symlink check, hardlink dedup, directory loop check, depth limit,
-// opendir/readdir/closedir. Deviations required by the producer seam:
-//   * per-file work and traversal failures go to the VISITOR (CrawlItem),
-//     not to a Session;
-//   * fatal cases (depth overflow, allocation failure, rlimit) throw
-//     FatalError with the historical texts (spec2 §5.10);
-//   * -f/-F/-h policy is FIXED (flags dropped per the ratified ruling):
-//     lstat always, no device pinning check, dedup always on.
-// The seen-inodes tsearch tree is freed in the destructor (replacing the
-// atexit workaround from the leak fix).
+// Traversal errors go to the VISITOR (CrawlItem), not to a Session.
+// Fatal cases (depth overflow, allocation failure, rlimit exhaustion)
+// throw FatalError with the historical message texts.
 
 #include "crawl.h"
 
@@ -31,7 +22,7 @@ namespace {
 
 constexpr int kMaxCrawlDepth = 1024;
 
-// compare device and inode information (verbatim from the monolith)
+// Orders (ino, dev) pairs for the seen-inodes tree.
 int compare_func(const void* p1, const void* p2) {
     const struct dev_and_inode* kp1 = static_cast<const struct dev_and_inode*>(p1);
     const struct dev_and_inode* kp2 = static_cast<const struct dev_and_inode*>(p2);
@@ -50,8 +41,6 @@ void free_dev_and_inode(void* p) {
 Crawler::Crawler() = default;
 
 Crawler::~Crawler() {
-    // Frees the seen-inodes tree (upstream leak, originally fixed via
-    // atexit in the CLI; owned properly by the state holder since Increment 1).
     if (state_.seen_inodes) {
         tdestroy(state_.seen_inodes, free_dev_and_inode);
         state_.seen_inodes = nullptr;
@@ -66,8 +55,7 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
     struct stat sb;
     char npath[PATH_MAX];
 
-    // prevent ugly double slashes when printing path names (verbatim;
-    // path is this frame's private copy)
+    // strip a trailing slash (path is this frame's private copy)
     const int tp_path_len = static_cast<int>(path.size());
     if (tp_path_len > 1 && path[tp_path_len - 1] == '/')
         path.erase(tp_path_len - 1);
@@ -87,19 +75,14 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
         return;
     }
 
-    // Fixed policy: hardlink dedup always on (upstream default).
+    // Hardlink dedup: without this, files copied as hardlinks (cp -al)
+    // are counted (and processed) once per link.
     if (sb.st_nlink > 1) {
-        /*
-         * For files with more than one link to it, ignore it if we already know
-         * inode.  Without this check files copied as hardlinks (cp -al) are
-         * counted twice (which may lead to a cache usage of more than 100% of
-         * RAM).
-         */
         struct dev_and_inode obj;
         obj.dev = sb.st_dev;
         obj.ino = sb.st_ino;
         if (tfind(&obj, &state_.seen_inodes, compare_func)) {
-            // we already saw the device and inode referenced by this file
+            // already seen this (dev, ino)
             return;
         }
         struct dev_and_inode* newp =
@@ -113,7 +96,7 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
     }
 
     if (S_ISDIR(sb.st_mode)) {
-        // Loop check against the directory-inode stack (spec2 §5.7).
+        // Loop check against the directory-inode stack.
         for (int i = 0; i < state_.curr_crawl_depth; i++) {
             if (state_.crawl_inodes[i] == sb.st_ino) {
                 const Failure f{Failure::Kind::CrawlLoop, 0, path, 0};
@@ -125,7 +108,7 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
         if (state_.curr_crawl_depth == kMaxCrawlDepth)
             throw FatalError("maximum directory crawl depth reached: " + path);
 
-        state_.total_dirs++;   // entered (counts even if opendir fails, spec2 §5.8)
+        state_.total_dirs++;   // entered (counts even if opendir fails)
 
         state_.crawl_inodes[state_.curr_crawl_depth] = sb.st_ino;
 
@@ -135,7 +118,7 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
             if (errno == ENFILE || errno == EMFILE) {
                 const auto r = platform::raise_nofile_rlimit();
                 if (r.outcome == platform::RaiseNofileResult::Outcome::Raised) {
-                    dirp = opendir(cpath);   // single retry, as upstream's goto did
+                    dirp = opendir(cpath);   // single retry
                 } else if (r.outcome == platform::RaiseNofileResult::Outcome::PermissionDenied) {
                     if (getuid() == 0 || geteuid() == 0)
                         throw FatalError("system open file limit reached");
