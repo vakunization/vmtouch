@@ -21,8 +21,6 @@
 #include <string>
 #include <string_view>
 
-#include <search.h>   // tsearch/tfind/tdestroy
-
 #include "common.h"
 
 namespace vmt {
@@ -60,8 +58,15 @@ private:
         int64_t total_dirs = 0;
         int curr_crawl_depth = 0;
         ino_t crawl_inodes[1024];      // MAX_CRAWL_DEPTH
-        void* seen_inodes = nullptr;   // tsearch tree until modernization
     };
+
+    // Keyed on (dev, ino): tracks files already seen for hardlink dedup.
+    struct DevInoHash {
+        size_t operator()(const dev_and_inode& k) const noexcept {
+            return std::hash<dev_t>{}(k.dev) ^ (std::hash<ino_t>{}(k.ino) << 1);
+        }
+    };
+    std::unordered_set<dev_and_inode, DevInoHash> seen_inodes_;
 
     // Mutates `path` in place (trailing-slash strip) — by design, see walk().
     void walk_impl(std::string& path, const CrawlVisitor& visitor);

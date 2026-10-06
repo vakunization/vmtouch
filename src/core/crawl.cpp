@@ -22,30 +22,11 @@ namespace {
 
 constexpr int kMaxCrawlDepth = 1024;
 
-// Orders (ino, dev) pairs for the seen-inodes tree.
-int compare_func(const void* p1, const void* p2) {
-    const struct dev_and_inode* kp1 = static_cast<const struct dev_and_inode*>(p1);
-    const struct dev_and_inode* kp2 = static_cast<const struct dev_and_inode*>(p2);
-    const int cmp1 = (kp1->ino > kp2->ino) - (kp1->ino < kp2->ino);
-    if (cmp1 != 0)
-        return cmp1;
-    return (kp1->dev > kp2->dev) - (kp1->dev < kp2->dev);
-}
-
-void free_dev_and_inode(void* p) {
-    free(p);
-}
-
 } // namespace
 
 Crawler::Crawler() = default;
 
-Crawler::~Crawler() {
-    if (state_.seen_inodes) {
-        tdestroy(state_.seen_inodes, free_dev_and_inode);
-        state_.seen_inodes = nullptr;
-    }
-}
+Crawler::~Crawler() = default;
 
 void Crawler::walk(std::string path, const CrawlVisitor& visitor) {
     walk_impl(path, visitor);
@@ -78,21 +59,9 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
     // Hardlink dedup: without this, files copied as hardlinks (cp -al)
     // are counted (and processed) once per link.
     if (sb.st_nlink > 1) {
-        struct dev_and_inode obj;
-        obj.dev = sb.st_dev;
-        obj.ino = sb.st_ino;
-        if (tfind(&obj, &state_.seen_inodes, compare_func)) {
-            // already seen this (dev, ino)
-            return;
-        }
-        struct dev_and_inode* newp =
-            static_cast<struct dev_and_inode*>(malloc(sizeof(struct dev_and_inode)));
-        if (newp == NULL)
-            throw FatalError("malloc: out of memory");
-        newp->dev = sb.st_dev;
-        newp->ino = sb.st_ino;
-        if (tsearch(newp, &state_.seen_inodes, compare_func) == NULL)
-            throw FatalError("tsearch: out of memory");
+        const dev_and_inode key{sb.st_dev, sb.st_ino};
+        if (!seen_inodes_.insert(key).second)
+            return;   // already seen this (dev, ino)
     }
 
     if (S_ISDIR(sb.st_mode)) {

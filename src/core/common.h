@@ -2,13 +2,14 @@
 
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
-#include <string>
-#include <vector>
+#include <cstdint>
 #include <functional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <unordered_set>
+#include <vector>
 
 #include <sys/types.h>   // dev_t, ino_t
 
@@ -27,6 +28,7 @@ struct FileInfoRange {
 struct dev_and_inode {
     dev_t dev;
     ino_t ino;
+    bool operator==(const dev_and_inode&) const = default;
 };
 
 // Library-level call policy. The CLI keeps all its own state separately.
