@@ -422,17 +422,12 @@ static void handle_pidfile_removal_request(const CliOptions& o) {
 
 
 
-static int run(int argc, char **argv) {
-  CliOptions o;          // CLI-level state (never rides on core Options)
-  Options lib_opts;      // the library's Options (verb/range/max_file_size/collect)
-  FileInfoRange f;
-  const std::string prog = argv[0];
-
-  if (pipe(g_daemon.exit_pipe))
-    fatal(std::format("pipe: {}", errno_message(errno)));
-
-  platform::init();
-
+// Parses argv into CLI options, library options, and the range.
+// Returns the operand (path) list. Unknown flags and missing values
+// terminate the process (usage/fatal).
+static std::vector<std::string_view> parse_cli_args(int argc, char **argv,
+                                                    CliOptions& o, Options& lib_opts,
+                                                    FileInfoRange& f) {
   // -f/-F/-i/-I are gone: traversal policy is fixed, the flags are
   // rejected as unknown options (-> usage). -h/--help show usage + exit 0.
   const std::vector<std::string_view> args(argv + 1, argv + argc);
@@ -493,8 +488,11 @@ static int run(int argc, char **argv) {
     }
   }
 
-  std::vector<std::string_view> operands(args.begin() + i, args.end());
+  return std::vector<std::string_view>(args.begin() + i, args.end());
+}
 
+// Validates flag combinations; adjusts output policy for quiet daemon mode.
+static void validate_cli(CliOptions& o, const std::vector<std::string_view>& operands) {
   if (o.touch && o.evict)
     fatal("invalid option combination: -t and -e");
 
@@ -518,14 +516,92 @@ static int run(int argc, char **argv) {
   if (!o.pidfile.empty() && (!o.lock && !o.lockall)) fatal("pidfile can only be created when -l or -L is specified");
 
   if (operands.empty() && o.batch.empty()) {
-    std::cout << std::format("{}: no files or directories specified\n", prog);
+    std::cout << "vmtouch: no files or directories specified\n";
     usage(1);
   }
+}
 
-  // Session created AFTER option parsing/validation so it holds the final
-  // library Options. ONE process() call carries all roots (argv + batch):
-  // cross-root dedup + one Report.
-  lib_opts.range = f;
+// Maps CLI verb selection to library Options and builds the Session.
+// ONE process() call later carries all roots (argv + batch): cross-root
+// dedup + one Report.
+static std::unique_ptr<Session> make_session(const CliOptions& o, const Options& lib_opts) {
+  Options opts = lib_opts;
+  opts.range = lib_opts.range;
+  opts.collect_failures = true;   // the CLI drains records (quiet gates printing)
+  if (o.touch) opts.verb = Options::Verb::Warm;
+  if (o.evict) opts.verb = Options::Verb::Evict;
+  if (o.lock)  opts.verb = Options::Verb::Lock;
+  if (o.lockall) opts.verb = Options::Verb::Warm;   // -L -> Warm; mlockall in the caller
+  return std::make_unique<Session>(opts);
+}
+
+// Prints per-file warnings from the Report (quiet gates printing). The
+// Fatal record is skipped here: it renders as the FATAL line in the caller.
+static void print_failure_warnings(const Session& session, bool quiet) {
+  if (quiet)
+    return;
+  for (const Failure& f : session.get_report().failures) {
+    if (f.kind == Failure::Kind::Fatal)
+      continue;
+    std::string msg = format_failure(f);
+    if (!msg.empty())
+      std::cerr << std::format("vmtouch: WARNING: {}\n", msg);
+  }
+}
+
+// Human summary (default or kv format) for a non-lock run.
+static void print_summary(const Session::Report& rep, const CliOptions& o) {
+  if (o.quiet)
+    return;
+
+  const int64_t total_pages_in_core_size = rep.total_pages_in_core * pagesize;
+  const int64_t total_pages_size         = rep.total_pages * pagesize;
+  const double  total_pages_in_core_perc = 100.0 * rep.total_pages_in_core / rep.total_pages;
+  const double  elapsed                  = rep.elapsed_seconds;   // steady_clock, through fatals
+
+  if (o.output.empty()) {
+    if (o.verbose)
+      std::cout << "\n";
+    std::cout << std::format("           Files: {}\n", rep.total_files);
+    std::cout << std::format("     Directories: {}\n", rep.total_dirs);
+    if (o.touch) {
+      std::cout << std::format("   Touched Pages: {} ({})\n", rep.total_pages, pretty_print_size(total_pages_size));
+    } else if (o.evict) {
+      std::cout << std::format("   Evicted Pages: {} ({})\n", rep.total_pages, pretty_print_size(total_pages_size));
+    } else {
+      std::cout << std::format("  Resident Pages: {}/{}  ", rep.total_pages_in_core, rep.total_pages);
+      std::cout << std::format("{}/", pretty_print_size(total_pages_in_core_size));
+      std::cout << std::format("{}  ", pretty_print_size(total_pages_size));
+      if (rep.total_pages)
+        std::cout << std::format("{:.3}%", total_pages_in_core_perc);
+      std::cout << "\n";
+    }
+    std::cout << std::format("         Elapsed: {:.5} seconds\n", elapsed);
+  } else if (o.output.starts_with("kv")) {
+    const std::string_view desc = o.touch ? "Touched" :
+                                  o.evict ? "Evicted" :
+                                            "Resident";
+    std::cout << std::format(
+        "Files={} Directories={} {}Pages={} TotalPages={} {}Size={} TotalSize={} {}Percent={:.3} Elapsed={:.5}\n",
+        rep.total_files, rep.total_dirs, desc, rep.total_pages_in_core, rep.total_pages,
+        desc, total_pages_in_core_size, total_pages_size, desc, total_pages_in_core_perc, elapsed);
+  }
+}
+
+static int run(int argc, char **argv) {
+  CliOptions o;          // CLI-level state (never rides on core Options)
+  Options lib_opts;      // the library's Options (verb/range/max_file_size/collect)
+  const std::string prog = argv[0];
+
+  if (pipe(g_daemon.exit_pipe))
+    fatal(std::format("pipe: {}", errno_message(errno)));
+
+  platform::init();
+
+  const std::vector<std::string_view> operands = parse_cli_args(argc, argv, o, lib_opts, lib_opts.range);
+  validate_cli(o, operands);
+
+  g_session = make_session(o, lib_opts);
   lib_opts.collect_failures = true;   // the CLI drains records (quiet gates printing)
   if (o.touch) lib_opts.verb = Options::Verb::Warm;
   if (o.evict) lib_opts.verb = Options::Verb::Evict;
@@ -542,24 +618,9 @@ static int run(int argc, char **argv) {
     roots.emplace_back(op);
 
   const Status st = g_session->process(roots);
-
-  // Failures (including the Fatal record) come from the Report; the quiet
-  // policy gates PRINTING here in the CLI.
-  if (!o.quiet) {
-    for (const Failure& f : g_session->get_report().failures) {
-      if (f.kind == Failure::Kind::Fatal)
-        continue;   // rendered below as the FATAL line
-      std::string msg = format_failure(f);
-      if (!msg.empty())
-        std::cerr << std::format("vmtouch: WARNING: {}\n", msg);
-    }
-  }
+  print_failure_warnings(*g_session, o.quiet != 0);
 
   const Session::Report& rep = g_session->get_report();
-  int64_t total_pages_in_core_size = rep.total_pages_in_core * pagesize;
-  int64_t total_pages_size         = rep.total_pages * pagesize;
-  double  total_pages_in_core_perc = 100.0 * rep.total_pages_in_core / rep.total_pages;
-  const double elapsed             = rep.elapsed_seconds;   // steady_clock, measured through fatals
 
   if (st == Status::Fatal) {
     // The Fatal record is always stored, never gated.
@@ -585,7 +646,7 @@ static int run(int argc, char **argv) {
     }
 
     if (!o.quiet)
-      std::cout << std::format("LOCKED {} pages ({})\n", rep.total_pages, pretty_print_size(total_pages_size));
+      std::cout << std::format("LOCKED {} pages ({})\n", rep.total_pages, pretty_print_size(rep.total_pages * pagesize));
 
     if (o.wait) reopen_all();
 
@@ -595,36 +656,7 @@ static int run(int argc, char **argv) {
     exit(0);
   }
 
-  if (!o.quiet) {
-    if (o.output.empty()) {
-      if (o.verbose)
-        std::cout << "\n";
-      std::cout << std::format("           Files: {}\n", rep.total_files);
-      std::cout << std::format("     Directories: {}\n", rep.total_dirs);
-      if (o.touch) {
-        std::cout << std::format("   Touched Pages: {} ({})\n", rep.total_pages, pretty_print_size(total_pages_size));
-      } else if (o.evict) {
-        std::cout << std::format("   Evicted Pages: {} ({})\n", rep.total_pages, pretty_print_size(total_pages_size));
-      } else {
-        std::cout << std::format("  Resident Pages: {}/{}  ", rep.total_pages_in_core, rep.total_pages);
-        std::cout << std::format("{}/", pretty_print_size(total_pages_in_core_size));
-        std::cout << std::format("{}  ", pretty_print_size(total_pages_size));
-        if (rep.total_pages)
-          std::cout << std::format("{:.3}%", total_pages_in_core_perc);
-        std::cout << "\n";
-      }
-      std::cout << std::format("         Elapsed: {:.5} seconds\n", elapsed);
-    } else if (std::string_view(o.output).starts_with("kv")) {
-      const std::string_view desc = o.touch ? "Touched" :
-                                    o.evict ? "Evicted" :
-                                              "Resident";
-      std::cout << std::format(
-          "Files={} Directories={} {}Pages={} TotalPages={} {}Size={} TotalSize={} {}Percent={:.3} Elapsed={:.5}\n",
-          rep.total_files, rep.total_dirs, desc, rep.total_pages_in_core, rep.total_pages,
-          desc, total_pages_in_core_size, total_pages_size, desc, total_pages_in_core_perc, elapsed);
-    }
-  }
-
+  print_summary(rep, o);
   return 0;
 }
 
