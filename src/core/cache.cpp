@@ -41,7 +41,7 @@ int64_t bytes2pages(int64_t bytes) {
 // own return value routed through errno for errno-less calls such as
 // posix_fadvise). Never throws: retryable-after-N is reported as a failure.
 template <typename Call>
-bool retry_op(const char* /*label*/, Call&& call, int& out_err) {
+bool retry_op(Call&& call, int& out_err) {
     int err = 0;
     for (int attempt = 0; attempt < kRetryAttempts; ++attempt) {
         errno = 0;   // each attempt classifies its own errno
@@ -62,7 +62,6 @@ bool retry_op(const char* /*label*/, Call&& call, int& out_err) {
 // Working state shared by the prelude and the verbs.
 struct Mapping {
     MappedRegion region;
-    struct stat st = {};        // fstat result (permission heuristic input)
     int64_t len_of_file = 0;
     int64_t len_of_range = 0;
     int64_t pages_in_range = 0;
@@ -77,13 +76,11 @@ vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok)
     int err = 0;
 
     struct stat sb;
-    if (!retry_op("fstat", [&] { return fstat(fd, &sb); }, err))
+    if (!retry_op([&] { return fstat(fd, &sb); }, err))
         return vmt::Result<void>::Error(Failure{Failure::Kind::FstatFailed, err, "", 0});
-    m.st = sb;
-
     if (S_ISBLK(sb.st_mode)) {
 #if defined(__linux__)
-        if (!retry_op("ioctl", [&] { return ioctl(fd, BLKGETSIZE64, &m.len_of_file); }, err))
+        if (!retry_op([&] { return ioctl(fd, BLKGETSIZE64, &m.len_of_file); }, err))
             return vmt::Result<void>::Error(Failure{Failure::Kind::IoctlSizeFailed, err, "", 0});
 #else
         throw FatalError("discovering size of block devices not (yet?) supported on this platform");
@@ -114,7 +111,7 @@ vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok)
 
     void* mem = MAP_FAILED;
     int map_err = 0;
-    if (!retry_op("mmap", [&] {
+    if (!retry_op([&] {
             mem = mmap(NULL, m.len_of_range, PROT_READ, MAP_SHARED, fd, p.range.offset);
             return mem == MAP_FAILED ? -1 : 0;
         }, map_err))
@@ -137,7 +134,7 @@ vmt::Result<int64_t> mincore_count(const Mapping& m) {
     std::vector<unsigned char> mincore_array(m.pages_in_range);
 
     int err = 0;
-    if (!retry_op("mincore", [&] {
+    if (!retry_op([&] {
             return mincore(m.region.mem(), m.len_of_range, mincore_array.data());
         }, err))
         return vmt::Result<int64_t>::Error(Failure{Failure::Kind::MincoreFailed, err, "", 0});
@@ -165,7 +162,7 @@ void touch_pages(const Mapping& m) {
 // success, so the retry genuinely re-attempts; on failure the still-live
 // region is released by the destructor.
 bool unmap_or_fail(MappedRegion& region, int& err) {
-    return retry_op("munmap", [&] { return region.unmap(err) ? 0 : -1; }, err);
+    return retry_op([&] { return region.unmap(err) ? 0 : -1; }, err);
 }
 
 } // namespace
@@ -226,7 +223,7 @@ vmt::Result<VerbOutcome> evict(int fd, const Params& p) {
 #if defined(__linux__) || defined(__hpux)
     // posix_fadvise returns the error code and does not set errno, so the
     // lambda routes its return value through errno for classification.
-    const bool ok = retry_op("posix_fadvise", [&] {
+    const bool ok = retry_op([&] {
         const int rc = posix_fadvise(fd, p.range.offset, m.len_of_range, POSIX_FADV_DONTNEED);
         if (rc != 0)
             errno = rc;
@@ -235,7 +232,7 @@ vmt::Result<VerbOutcome> evict(int fd, const Params& p) {
     if (!ok)
         return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::EvictAdviseFailed, err, "", 0});
 #elif defined(__FreeBSD__) || defined(__sun__) || defined(__APPLE__)
-    const bool ok = retry_op("msync", [&] {
+    const bool ok = retry_op([&] {
         return msync(m.region.mem(), m.len_of_range, MS_INVALIDATE);
     }, err);
     if (!ok)
@@ -263,7 +260,7 @@ vmt::Result<VerbOutcome> lock(int fd, const Params& p) {
     touch_pages(m);   // -l implies touch
 
     int err = 0;
-    if (!retry_op("mlock", [&] {
+    if (!retry_op([&] {
             return mlock(m.region.mem(), m.len_of_range);
         }, err))
         return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::MlockFailed, err, "", 0});

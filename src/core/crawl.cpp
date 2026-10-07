@@ -7,7 +7,6 @@
 #include "crawl.h"
 
 #include <cerrno>
-#include <cstdlib>
 #include <cstring>
 
 #include <dirent.h>
@@ -17,15 +16,14 @@
 #include "platform.h"
 
 namespace vmt {
-namespace {
 
 constexpr int kMaxCrawlDepth = 1024;
 
-} // namespace
-
-Crawler::Crawler() = default;
-
-Crawler::~Crawler() = default;
+void Crawler::emit(const std::string& path, Failure::Kind kind, int32_t err,
+                   const CrawlVisitor& visitor) {
+    const Failure f{kind, err, path, 0};
+    visitor(CrawlItem{path, &f});
+}
 
 void Crawler::walk(std::string path, const CrawlVisitor& visitor) {
     walk_impl(path, visitor);
@@ -42,14 +40,12 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
     int res = lstat(cpath, &sb);   // fixed policy: never follow symlinks
 
     if (res) {
-        const Failure f{Failure::Kind::Stat, errno, path, 0};
-        visitor(CrawlItem{path, &f});
+        emit(path, Failure::Kind::Stat, errno, visitor);
         return;
     }
 
     if (S_ISLNK(sb.st_mode)) {
-        const Failure f{Failure::Kind::Symlink, 0, path, 0};
-        visitor(CrawlItem{path, &f});
+        emit(path, Failure::Kind::Symlink, 0, visitor);
         return;
     }
 
@@ -63,20 +59,18 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
 
     if (S_ISDIR(sb.st_mode)) {
         // Loop check against the directory-inode stack.
-        for (int i = 0; i < state_.curr_crawl_depth; i++) {
-            if (state_.crawl_inodes[i] == sb.st_ino) {
-                const Failure f{Failure::Kind::CrawlLoop, 0, path, 0};
-                visitor(CrawlItem{path, &f});
+        for (const ino_t ino : depth_stack_) {
+            if (ino == sb.st_ino) {
+                emit(path, Failure::Kind::CrawlLoop, 0, visitor);
                 return;
             }
         }
 
-        if (state_.curr_crawl_depth == kMaxCrawlDepth)
+        if (depth_stack_.size() >= kMaxCrawlDepth)
             throw FatalError("maximum directory crawl depth reached: " + path);
 
-        state_.total_dirs++;   // entered (counts even if opendir fails)
-
-        state_.crawl_inodes[state_.curr_crawl_depth] = sb.st_ino;
+        total_dirs_++;   // entered (counts even if opendir fails)
+        depth_stack_.push_back(sb.st_ino);
 
         DIR* dirp = opendir(cpath);
 
@@ -99,8 +93,7 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
             }
 
             if (dirp == NULL) {
-                const Failure f{Failure::Kind::OpendirFailed, errno, path, 0};
-                visitor(CrawlItem{path, &f});
+                emit(path, Failure::Kind::OpendirFailed, errno, visitor);
                 return;
             }
         }
@@ -115,21 +108,19 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
             child += '/';
             child += de->d_name;
 
-            state_.curr_crawl_depth++;
             walk_impl(child, visitor);   // recursion: child is this frame's own copy
-            state_.curr_crawl_depth--;
         }
 
         if (closedir(dirp)) {
-            const Failure f{Failure::Kind::Closedir, errno, path, 0};
-            visitor(CrawlItem{path, &f});
+            emit(path, Failure::Kind::Closedir, errno, visitor);
             return;
         }
+
+        depth_stack_.pop_back();
     } else if (S_ISREG(sb.st_mode) || S_ISBLK(sb.st_mode)) {
         visitor(CrawlItem{std::string_view(path), nullptr});   // a file item
     } else {
-        const Failure f{Failure::Kind::NotRegular, 0, path, 0};
-        visitor(CrawlItem{path, &f});
+        emit(path, Failure::Kind::NotRegular, 0, visitor);
     }
 }
 

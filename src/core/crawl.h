@@ -20,6 +20,8 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
+#include <vector>
 
 #include "common.h"
 
@@ -38,8 +40,8 @@ using CrawlVisitor = std::function<void(const CrawlItem&)>;
 
 class Crawler {
 public:
-    Crawler();
-    ~Crawler();
+    Crawler() = default;
+    ~Crawler() = default;
 
     Crawler(const Crawler&) = delete;
     Crawler& operator=(const Crawler&) = delete;
@@ -51,14 +53,18 @@ public:
 
     // Directories entered so far (incremented before opendir; a failed
     // opendir still counts). Summed over all walk() calls on this Crawler.
-    int64_t dirs_seen() const { return state_.total_dirs; }
+    int64_t dirs_seen() const { return total_dirs_; }
 
 private:
-    struct State {
-        int64_t total_dirs = 0;
-        int curr_crawl_depth = 0;
-        ino_t crawl_inodes[1024];      // MAX_CRAWL_DEPTH
-    };
+    // Emits a traversal-level Failure for `path` to the visitor.
+    void emit(const std::string& path, Failure::Kind kind, int32_t err,
+              const CrawlVisitor& visitor);
+
+    // Mutates `path` in place (trailing-slash strip) — by design, see walk().
+    void walk_impl(std::string& path, const CrawlVisitor& visitor);
+
+    int64_t total_dirs_ = 0;
+    std::vector<ino_t> depth_stack_;   // directory inodes on the current path
 
     // Keyed on (dev, ino): tracks files already seen for hardlink dedup.
     struct DevInoHash {
@@ -67,11 +73,6 @@ private:
         }
     };
     std::unordered_set<dev_and_inode, DevInoHash> seen_inodes_;
-
-    // Mutates `path` in place (trailing-slash strip) — by design, see walk().
-    void walk_impl(std::string& path, const CrawlVisitor& visitor);
-
-    State state_;
 };
 
 } // namespace vmt

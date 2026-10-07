@@ -526,7 +526,6 @@ static void validate_cli(CliOptions& o, const std::vector<std::string_view>& ope
 // dedup + one Report.
 static std::unique_ptr<Session> make_session(const CliOptions& o, const Options& lib_opts) {
   Options opts = lib_opts;
-  opts.range = lib_opts.range;
   opts.collect_failures = true;   // the CLI drains records (quiet gates printing)
   if (o.touch) opts.verb = Options::Verb::Warm;
   if (o.evict) opts.verb = Options::Verb::Evict;
@@ -591,7 +590,6 @@ static void print_summary(const Session::Report& rep, const CliOptions& o) {
 static int run(int argc, char **argv) {
   CliOptions o;          // CLI-level state (never rides on core Options)
   Options lib_opts;      // the library's Options (verb/range/max_file_size/collect)
-  const std::string prog = argv[0];
 
   if (pipe(g_daemon.exit_pipe))
     fatal(std::format("pipe: {}", errno_message(errno)));
