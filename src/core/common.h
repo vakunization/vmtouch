@@ -40,9 +40,8 @@ struct Options {
 
 // Result codes returned by core entry points (cache/session).
 enum class Status : int32_t {
-    Ok = 0,        // call completed; per-file problems are in the Report
-    Skipped = 1,   // reserved (not produced)
-    Fatal = 2,     // traversal interrupted; Report holds everything + the Fatal record
+    Ok = 0,     // call completed; per-file problems are in the Report
+    Fatal = 1,  // traversal interrupted; Report holds everything + the Fatal record
 };
 
 // Error that stops the whole traversal (allocation failure, misaligned

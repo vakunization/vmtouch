@@ -58,11 +58,13 @@ mk "$T/d/sub/b" 5
 
 # --- usage / exit codes ------------------------------------------------------
 
-"$VMFILE" -h >/dev/null 2>&1;     rc_is $? 1 "-h rejected (unknown option)"
-"$VMFILE" --help >/dev/null 2>&1; rc_is $? 1 "--help rejected"
+# -h/--help are real help flags now: usage on stdout, exit 0. The old
+# upstream -h ("count hardlinked copies") is gone, so -h is recycled.
+"$VMFILE" -h >/dev/null 2>&1;     rc_is $? 0 "-h prints usage and exits 0"
+"$VMFILE" --help >/dev/null 2>&1; rc_is $? 0 "--help prints usage and exits 0"
+has "$($VMFILE --help)" "Usage: vmtouch" "--help output contains usage"
 "$VMFILE" -f x >/dev/null 2>&1;   rc_is $? 1 "-f rejected (flag dropped)"
 "$VMFILE" -F x >/dev/null 2>&1;   rc_is $? 1 "-F rejected (flag dropped)"
-"$VMFILE" -h x >/dev/null 2>&1;   rc_is $? 1 "-h rejected (flag dropped)"
 "$VMFILE" -i x y >/dev/null 2>&1; rc_is $? 1 "-i rejected (flag dropped)"
 "$VMFILE" -I x y >/dev/null 2>&1; rc_is $? 1 "-I rejected (flag dropped)"
 
