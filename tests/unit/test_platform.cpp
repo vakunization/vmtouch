@@ -1,6 +1,6 @@
 // tests/unit/test_platform.cpp — behavior tests for core/platform.
 //
-// The page math, mincore decoding, and version comparison are the
+// The page math, mincore decoding, and the rlimit-raise contract are the
 // library's most basic contracts.
 
 #include "test.h"
@@ -8,11 +8,13 @@
 #include "core/platform.h"
 #include "core/common.h"
 
+#include <cerrno>
+#include <sys/resource.h>
 #include <unistd.h>
 
 // The CLI's parse helpers live in main.cpp; exercised here through the
 // same rules they enforce (size/range parsing is contract, tested via
-// the KernelVersion and pure helpers where possible).
+// the pure helpers where possible).
 
 TEST(page_size_is_sane) {
     platform::init();
@@ -40,37 +42,37 @@ TEST(mincore_resident_bit) {
     EXPECT_FALSE(platform::is_mincore_page_resident(0xFE));
 }
 
-TEST(kernel_version_parse_and_compare) {
-    using platform::KernelVersion;
-    using platform::parse_kernel_version;
+TEST(raise_nofile_already_at_hard_limit_is_noop) {
+    // Soft limit already at the hard limit: the raise must report Raised
+    // (a no-op, not a failure) and must not touch the hard limit.
+    struct rlimit r;
+    if (getrlimit(RLIMIT_NOFILE, &r) != 0) {
+        std::printf("  skip rlimit noop test (getrlimit failed)\n");
+        return;
+    }
+    r.rlim_cur = r.rlim_max;
+    (void)setrlimit(RLIMIT_NOFILE, &r);   // best effort; EPERM below is fine
 
-    const auto v = parse_kernel_version("6.9.4-arch1");
-    EXPECT_EQ(v.major, 6);
-    EXPECT_EQ(v.minor, 9);
+    const auto res = platform::raise_nofile_rlimit();
+    EXPECT_TRUE(res.outcome == platform::RaiseNofileResult::Outcome::Raised ||
+                res.outcome == platform::RaiseNofileResult::Outcome::PermissionDenied);
 
-    const auto plain = parse_kernel_version("5.2");
-    EXPECT_EQ(plain.major, 5);
-    EXPECT_EQ(plain.minor, 2);
+    struct rlimit after;
+    EXPECT_TRUE(getrlimit(RLIMIT_NOFILE, &after) == 0);
+    EXPECT_TRUE(after.rlim_max == r.rlim_max);   // hard limit untouched
+}
 
-    const auto single = parse_kernel_version("4");
-    EXPECT_EQ(single.major, 4);
-    EXPECT_EQ(single.minor, 0);
+TEST(nofile_fatal_message_texts) {
+    using platform::RaiseNofileResult;
 
-    const auto garbage = parse_kernel_version("not-a-version");
-    EXPECT_EQ(garbage.major, 0);
-    EXPECT_EQ(garbage.minor, 0);
-
-    using KV = platform::KernelVersion;
-    constexpr KV v4_19{4, 19}, v5_1{5, 1}, v5_2{5, 2}, v5_9{5, 9}, v6_0{6, 0}, v6_1{6, 1};
-
-    // Ordering: the 6.x regression case that broke the old hand-rolled
-    // comparison (ver[0] < 5 || ver[1] < 2 misread 6.1 as "old").
-    EXPECT_TRUE(v4_19 < v5_2);
-    EXPECT_TRUE(v5_1 < v5_2);
-    EXPECT_FALSE(v5_2 < v5_2);
-    EXPECT_TRUE(v5_2 >= v5_2);
-    EXPECT_TRUE(v6_1 >= v5_2);   // the fix
-    EXPECT_TRUE(v6_0 >= v5_2);
-    EXPECT_TRUE(v5_9 >= v5_2);
-    EXPECT_FALSE(v5_1 >= v5_2);
+    EXPECT_STREQ(platform::nofile_fatal_message(
+                     RaiseNofileResult{RaiseNofileResult::Outcome::PermissionDenied, EPERM}),
+                 getuid() == 0 ? "system open file limit reached"
+                               : "open file limit reached and unable to increase limit. retry as root");
+    EXPECT_STREQ(platform::nofile_fatal_message(
+                     RaiseNofileResult{RaiseNofileResult::Outcome::GetrlimitFailed, EACCES}),
+                 "increment_nofile_rlimit: getrlimit (Permission denied)");
+    EXPECT_STREQ(platform::nofile_fatal_message(
+                     RaiseNofileResult{RaiseNofileResult::Outcome::SetrlimitFailed, EACCES}),
+                 "increment_nofile_rlimit: setrlimit (Permission denied)");
 }

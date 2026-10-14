@@ -31,6 +31,8 @@
 #include "cache.h"
 #include "crawl.h"
 
+namespace vmt {
+
 class Session {
 public:
     // The call result. Invariants:
@@ -87,3 +89,5 @@ private:
     Report report_;                                  // last call's Report
     std::vector<cache::MappedRegion> kept_regions_;  // Lock: alive for process lifetime
 };
+
+} // namespace vmt

@@ -3,33 +3,18 @@
 #include "file_handle.h"
 
 #include <cerrno>
-#include <cstring>
 
 #include <fcntl.h>
-#include <unistd.h>
 
 #include "platform.h"
 
 namespace vmt {
 namespace {
 
-// Translates the failed rlimit raise into the historical fatal messages.
+// Translates the failed rlimit raise into the historical fatal messages
+// (the shared texts live in platform::nofile_fatal_message).
 [[noreturn]] void throw_nofile_fatal(const platform::RaiseNofileResult& res) {
-    switch (res.outcome) {
-        case platform::RaiseNofileResult::Outcome::GetrlimitFailed:
-            throw FatalError(std::string("increment_nofile_rlimit: getrlimit (") +
-                             strerror(res.err) + ")");
-        case platform::RaiseNofileResult::Outcome::PermissionDenied:
-            if (getuid() == 0 || geteuid() == 0)
-                throw FatalError("system open file limit reached");
-            throw FatalError("open file limit reached and unable to increase limit. retry as root");
-        case platform::RaiseNofileResult::Outcome::SetrlimitFailed:
-            throw FatalError(std::string("increment_nofile_rlimit: setrlimit (") +
-                             strerror(res.err) + ")");
-        case platform::RaiseNofileResult::Outcome::Raised:
-            break;   // not an error; unreachable via this function
-    }
-    throw FatalError("increment_nofile_rlimit: unexpected state");
+    throw FatalError(platform::nofile_fatal_message(res));
 }
 
 } // namespace

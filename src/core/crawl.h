@@ -17,15 +17,26 @@
 
 #pragma once
 
+#include <cstddef>       // size_t
 #include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
 #include <vector>
 
+#include <sys/types.h>   // dev_t, ino_t
+
 #include "common.h"
 
 namespace vmt {
+
+// Identity of an already-seen file (hardlink dedup). Co-located with the
+// only consumer (the Crawler's seen-inode set).
+struct dev_and_inode {
+    dev_t dev;
+    ino_t ino;
+    bool operator==(const dev_and_inode&) const = default;
+};
 
 // One emitted item: exactly one side is meaningful.
 //   error == nullptr -> a file (regular or block device) at `path`

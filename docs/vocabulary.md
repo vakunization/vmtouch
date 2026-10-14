@@ -28,11 +28,11 @@ regardless of `-q`; formatted by the CLI.
 | 5 | `BeyondEof` | `-p` offset | `file PATH smaller than offset, skipping` |
 | 6 | `NotRegular` | crawl type check | `skipping non-regular file: PATH` |
 | 7 | `Symlink` | crawl, no `-f` | `not following symbolic link PATH` |
-| 8 | `SeparateFs` | crawl, `-F` | `not recursing into separate filesystem PATH` |
+| — | *(8 was `SeparateFs`; removed 2026-10, no producer)* | — | — |
 | 9 | `CrawlLoop` | crawl loop check | `symbolic link loop detected: PATH` |
-| 10 | `PathTooLong` | crawl | `path too long PATH` |
-| 11 | `MincoreInaccurate` | kernel >= 5.2 heuristic | `Process does not have write permission, residency chart will not be accurate` |
-| 12 | `EvictFailed` | *(legacy umbrella; superseded by 18/19)* | `unable to evict PATH (ERR)` |
+| — | *(10 was `PathTooLong`; removed 2026-10, no producer)* | — | — |
+| — | *(11 was `MincoreInaccurate`; removed 2026-10, no producer)* | — | — |
+| — | *(12 was `EvictFailed`; removed 2026-10, superseded by 18/19)* | — | — |
 | 13 | `Closedir` | crawl | `unable to closedir PATH (ERR)` |
 | 14 | `FstatFailed` | verb prelude fstat | `unable to fstat PATH (ERR), skipping` |
 | 15 | `IoctlSizeFailed` | block-device size | `unable to ioctl PATH (ERR), skipping` |
@@ -43,8 +43,9 @@ regardless of `-q`; formatted by the CLI.
 
 Values 1–13 are the original A1 set (frozen by decision); 14–19 were
 added by the A1-drift fix so each upstream warning *site* renders its own
-text. `EvictFailed` (12) remains for compatibility but is no longer
-produced by the engine (18/19 are).
+text. Values 8/10/11/12 were removed in 2026-10 (no producers; numbering
+of the survivors is unchanged). The 2026-10 set also added 20 `Fatal`,
+21 `MlockFailed` and 22 `MincoreFailed` (see common.h).
 
 ## 2. `Failure` — one recorded skip/failure (common.h)
 

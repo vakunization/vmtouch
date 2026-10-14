@@ -7,11 +7,6 @@
 #include <functional>
 #include <stdexcept>
 #include <string>
-#include <string_view>
-#include <unordered_set>
-#include <vector>
-
-#include <sys/types.h>   // dev_t, ino_t
 
 // Set once at startup by the CLI (platform::init()).
 extern long pagesize;
@@ -20,13 +15,6 @@ extern long pagesize;
 struct FileInfoRange {
     int64_t offset = 0;
     int64_t max_len = 0;
-};
-
-// Identity of an already-seen file (hardlink dedup).
-struct dev_and_inode {
-    dev_t dev;
-    ino_t ino;
-    bool operator==(const dev_and_inode&) const = default;
 };
 
 // Library-level call policy. The CLI keeps all its own state separately.
@@ -54,7 +42,9 @@ public:
 
 // One recorded failure. The library reports facts; the CLI formats text.
 // Kind values are frozen — the Phase-3 C enum maps 1:1. Additions are
-// allowed; renumbering is not.
+// allowed; renumbering is not. (Kinds 8/10/11/12 were removed in 2026-10:
+// they had no producers; their historical texts remain documented in
+// docs/vocabulary.md.)
 struct Failure {
     enum class Kind : int32_t {
         Open = 1,             // unable to open
@@ -64,11 +54,11 @@ struct Failure {
         BeyondEof = 5,        // -p offset beyond EOF
         NotRegular = 6,       // skipping non-regular file
         Symlink = 7,          // not following symbolic link
-        SeparateFs = 8,       // RESERVED, no current producer (crawler never emits)
+        // 8 was SeparateFs (reserved, no producer)   — removed
         CrawlLoop = 9,        // symbolic link loop detected
-        PathTooLong = 10,     // RESERVED, no current producer (paths are unbounded)
-        MincoreInaccurate = 11, // RESERVED, no current producer
-        EvictFailed = 12,     // RESERVED, no current producer (superseded by 18/19)
+        // 10 was PathTooLong (reserved, no producer) — removed
+        // 11 was MincoreInaccurate (no producer)     — removed
+        // 12 was EvictFailed (superseded by 18/19)   — removed
         Closedir = 13,        // unable to closedir
         FstatFailed = 14,     // unable to fstat PATH (ERR), skipping
         IoctlSizeFailed = 15, // unable to ioctl PATH (ERR), skipping

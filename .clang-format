@@ -1,0 +1,10 @@
+# vmtouch C++ port — formatting
+# 2-space indent (the historical style of cli/main.cpp), 100 columns.
+BasedOnStyle: LLVM
+IndentWidth: 2
+ColumnLimit: 100
+UseTab: Never
+PointerAlignment: Right
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AlwaysBreakTemplateDeclarations: Yes

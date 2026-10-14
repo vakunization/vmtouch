@@ -10,7 +10,10 @@
 //              path EMPTY (the caller attaches the path). Any syscall
 //              failure is a per-file Failed — non-retryable and
 //              retryable-after-N (3x50ms, EINTR/EAGAIN/EBUSY) alike;
-//              traversal continues;
+//              traversal continues. NOTE: a Failed verb contributes NO
+//              page stats — the file's pages never reach the Report
+//              (upstream counted them before the destructive step; this
+//              stricter semantics is intentional — document if it changes);
 //   * Fatal -> throw FatalError — infrastructure only: allocation failure,
 //              misaligned mmap, unsupported platform. Traversal stops.
 //
@@ -19,7 +22,6 @@
 #pragma once
 
 #include <cstdint>
-#include <stddef.h>
 
 #include <sys/mman.h>    // munmap
 
@@ -34,13 +36,8 @@ struct Params {
     size_t max_file_size = SIZE_MAX;        // -m (SIZE_MAX = unlimited)
 };
 
-// What to do with the mapped pages. Values are frozen (C ABI).
-enum class Verb : int32_t {
-    Inspect = 1,   // query residency
-    Warm    = 2,   // -t: touch pages into cache
-    Evict   = 3,   // -e: drop pages from cache
-    Lock    = 4,   // -l: touch + mlock, mapping kept
-};
+// What to do with the mapped pages: selected by Options::Verb in the
+// session (the dispatch calls inspect/warm/evict/lock directly).
 
 // Owning handle for a live mmap region. Move-only; the destructor munmaps
 // if live. unmap() is an explicit early munmap: it clears the handle only

@@ -13,7 +13,7 @@ namespace {
 
 struct Fixture {
     unit::WarningCapture warn;
-    std::unique_ptr<Session> session;
+    std::unique_ptr<vmt::Session> session;
 
     explicit Fixture(const FileInfoRange& range = {}, bool quiet = false) {
         session = unit::make_session(unit::make_shared_state(), warn, range, quiet);
@@ -39,7 +39,7 @@ TEST(session_process_missing_path_records_stat_and_fails) {
     Status st = fx.session->process(span_of(roots));
 
     EXPECT_EQ((int)st, (int)Status::Ok);   // per-file problem; not fatal
-    const Session::Report& r = fx.session->get_report();
+    const vmt::Session::Report& r = fx.session->get_report();
     EXPECT_EQ(r.total_files, 0);           // nothing discovered
     EXPECT_EQ(r.failed, 1);                // the root itself failed
     EXPECT_EQ(r.failures.size(), (size_t)1);
@@ -55,7 +55,7 @@ TEST(session_process_file_end_to_end) {
     Status st = fx.session->process(fx.one(f.path));
 
     EXPECT_EQ((int)st, (int)Status::Ok);
-    const Session::Report& r = fx.session->get_report();
+    const vmt::Session::Report& r = fx.session->get_report();
     EXPECT_EQ(r.total_files, 1);
     EXPECT_EQ(r.failed, 0);
     EXPECT_EQ(r.total_pages, 3);
@@ -71,7 +71,7 @@ TEST(session_single_call_multiple_roots_one_report) {
 
     (void)fx.session->process(span_of(roots));
 
-    const Session::Report& r = fx.session->get_report();
+    const vmt::Session::Report& r = fx.session->get_report();
     EXPECT_EQ(r.total_files, 2);
     EXPECT_EQ(r.total_pages, 5);
     EXPECT_EQ(r.failed, 0);
@@ -87,7 +87,7 @@ TEST(session_report_resets_between_calls) {
 
     // Second call: ONE call = ONE Report (reset at entry, spec2 §2.5).
     (void)fx.session->process(fx.one(b.path));
-    const Session::Report& r2 = fx.session->get_report();
+    const vmt::Session::Report& r2 = fx.session->get_report();
     EXPECT_EQ(r2.total_files, 1);
     EXPECT_EQ(r2.total_pages, 3);   // not 5 — the Report was reset
 }
@@ -110,7 +110,7 @@ TEST(session_empty_file_counted_not_failed) {
 
     (void)fx.session->process(fx.one(f.path));
 
-    const Session::Report& r = fx.session->get_report();
+    const vmt::Session::Report& r = fx.session->get_report();
     EXPECT_EQ(r.total_files, 1);   // discovered
     EXPECT_EQ(r.failed, 0);        // empty is NOT a failure (spec2 §7.13)
     EXPECT_EQ(r.total_pages, 0);
@@ -122,12 +122,12 @@ TEST(session_collect_failures_false_still_counts_failed) {
     unit::WarningCapture warn;
     Options o;
     o.collect_failures = false;
-    auto session = std::make_unique<Session>(o);
+    auto session = std::make_unique<vmt::Session>(o);
 
     const std::vector<std::string> roots = {"/tmp/vmtouch-no-such-file-evar"};
     (void)session->process(span_of(roots));
 
-    const Session::Report& r = session->get_report();
+    const vmt::Session::Report& r = session->get_report();
     EXPECT_EQ(r.failed, 1);                 // counted regardless
     EXPECT_EQ(r.failures.size(), (size_t)0);  // but not collected
 }
@@ -154,7 +154,7 @@ TEST(session_process_fd_ok_and_report) {
     Status st = fx.session->process_fd(f.fd, 0, 0);
 
     EXPECT_EQ((int)st, (int)Status::Ok);
-    const Session::Report& r = fx.session->get_report();
+    const vmt::Session::Report& r = fx.session->get_report();
     EXPECT_EQ(r.total_pages, 3);                 // Report semantics identical to process()
     EXPECT_EQ(r.failed, 0);
     EXPECT_EQ(r.total_files, 0);                 // no path discovery for a raw fd
@@ -188,7 +188,7 @@ TEST(session_process_fd_bad_fd_records_open_failure) {
     Status st = fx.session->process_fd(-1, 0, 0);
 
     EXPECT_EQ((int)st, (int)Status::Ok);   // not fatal
-    const Session::Report& r = fx.session->get_report();
+    const vmt::Session::Report& r = fx.session->get_report();
     EXPECT_EQ(r.failed, 1);
     EXPECT_EQ(r.failures.size(), (size_t)1);
     EXPECT_EQ((int)r.failures[0].kind, (int)Failure::Kind::Open);
@@ -201,14 +201,14 @@ TEST(session_process_fd_beyond_eof_records_beyond_eof) {
 
     (void)fx.session->process_fd(f.fd, 10 * pagesize, 0);
 
-    const Session::Report& r = fx.session->get_report();
+    const vmt::Session::Report& r = fx.session->get_report();
     EXPECT_EQ(r.failed, 1);
     EXPECT_EQ((int)r.failures[0].kind, (int)Failure::Kind::BeyondEof);
 }
 
 TEST(session_get_report_zeroed_before_any_call) {
     Fixture fx;
-    const Session::Report& r = fx.session->get_report();
+    const vmt::Session::Report& r = fx.session->get_report();
     EXPECT_EQ(r.total_files, 0);
     EXPECT_EQ(r.failed, 0);
     EXPECT_EQ(r.total_pages, 0);

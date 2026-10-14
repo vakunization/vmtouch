@@ -1,8 +1,10 @@
 # Build outputs
 /build/
 /build-plain/
+/build-san/
 /vmtouch
 /vmtouch.8
+/docs/
 
 # Editor / OS noise
 *.swp

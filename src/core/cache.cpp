@@ -52,7 +52,7 @@ bool retry_op(Call&& call, int& out_err) {
         err = errno;
         if (!is_retryable(err))
             break;
-        if (attempt + 1 < kRetryAttempts)
+        if (err != EINTR && attempt + 1 < kRetryAttempts)
             std::this_thread::sleep_for(std::chrono::milliseconds(kRetrySleepMs));
     }
     out_err = err;
@@ -99,7 +99,13 @@ vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok)
 
     // ---- range selection --------------------------------------------------
 
-    if (p.range.max_len > 0 && (p.range.offset + p.range.max_len) < m.len_of_file) {
+    // Unsigned arithmetic for the range end: offset and max_len are
+    // non-negative user input capped at INT64_MAX, so their sum can exceed
+    // INT64_MAX and would be UB as signed addition.
+    const uint64_t range_end =
+        static_cast<uint64_t>(p.range.offset) + static_cast<uint64_t>(p.range.max_len);
+
+    if (p.range.max_len > 0 && range_end < static_cast<uint64_t>(m.len_of_file)) {
         m.len_of_range = p.range.max_len;
     } else if (p.range.offset >= m.len_of_file) {
         return vmt::Result<void>::Error(Failure{Failure::Kind::BeyondEof, 0, "", p.range.offset});
@@ -112,13 +118,13 @@ vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok)
     void* mem = MAP_FAILED;
     int map_err = 0;
     if (!retry_op([&] {
-            mem = mmap(NULL, m.len_of_range, PROT_READ, MAP_SHARED, fd, p.range.offset);
+            mem = mmap(nullptr, m.len_of_range, PROT_READ, MAP_SHARED, fd, p.range.offset);
             return mem == MAP_FAILED ? -1 : 0;
         }, map_err))
         return vmt::Result<void>::Error(Failure{Failure::Kind::Map, map_err, "", 0});
 
     if (!platform::aligned_p(mem)) {   // infrastructure failure
-        munmap(mem, m.len_of_range);
+        (void)munmap(mem, m.len_of_range);   // best effort; the Fatal is the report
         throw FatalError("mmap wasn't page aligned");
     }
 
@@ -149,18 +155,20 @@ vmt::Result<int64_t> mincore_count(const Mapping& m) {
 }
 
 // Reads the first byte of every page; this access IS the feature (it faults
-// pages in). The accumulator is read back so the loop is not optimized away.
+// pages in). The volatile accumulator keeps the dead stores; the loop is
+// never elided (read-back is unnecessary).
 void touch_pages(const Mapping& m) {
     volatile uint64_t j = 0;
     for (int64_t i = 0; i < m.pages_in_range; i++)
         j += (static_cast<char*>(m.region.mem()))[i * pagesize];
-    uint64_t touched = j;
-    static_cast<void>(touched);
+    static_cast<void>(j);
 }
 
 // Unmaps a region inside a verb. unmap() clears the handle only on
 // success, so the retry genuinely re-attempts; on failure the still-live
-// region is released by the destructor.
+// region is released by the destructor. Error ownership: unmap() reports
+// the raw errno through its out-param; retry_op owns the retry policy and
+// its out_err receives the same value on the first (non-retryable) failure.
 bool unmap_or_fail(MappedRegion& region, int& err) {
     return retry_op([&] { return region.unmap(err) ? 0 : -1; }, err);
 }

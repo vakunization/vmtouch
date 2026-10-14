@@ -2,7 +2,11 @@
 
 #include "platform.h"
 
-#include <cstdlib>
+#include <cerrno>
+#include <cstring>
+#include <string>
+
+#include <limits.h>   // RLIM_INFINITY
 #include <sys/resource.h>
 #include <unistd.h>
 
@@ -15,7 +19,10 @@ long pagesize = 4096;
 namespace platform {
 
 void init() {
-    pagesize = sysconf(_SC_PAGESIZE);
+    const long ps = sysconf(_SC_PAGESIZE);
+    if (ps <= 0)   // -1 (error) or 0 (never true, but poison either way)
+        throw FatalError("sysconf(_SC_PAGESIZE) failed");
+    pagesize = ps;
 }
 
 bool aligned_p(const void* p) {
@@ -26,27 +33,18 @@ bool is_mincore_page_resident(unsigned char mincore_byte) {
     return mincore_byte & 0x1;
 }
 
-KernelVersion parse_kernel_version(const char* release) {
-    KernelVersion v;
-    if (!release)
-        return v;
-    const char* p = release;
-    v.major = static_cast<int>(strtoul(p, const_cast<char**>(&p), 10));
-    if (*p == '.') {
-        ++p;
-        v.minor = static_cast<int>(strtoul(p, const_cast<char**>(&p), 10));
-    }
-    return v;
-}
-
 RaiseNofileResult raise_nofile_rlimit() {
     struct rlimit r;
 
     if (getrlimit(RLIMIT_NOFILE, &r))
         return {RaiseNofileResult::Outcome::GetrlimitFailed, errno};
 
-    r.rlim_cur = r.rlim_max + 1;
-    r.rlim_max = r.rlim_max + 1;
+    // Raise the SOFT limit to the hard limit and leave the hard limit alone:
+    // raising rlim_max requires CAP_SYS_RESOURCE (unprivileged setrlimit would
+    // always fail with EPERM), and rlim_max + 1 wraps RLIM_INFINITY to 0.
+    if (r.rlim_cur >= r.rlim_max)   // already at the hard limit (incl. RLIM_INFINITY)
+        return {RaiseNofileResult::Outcome::Raised, 0};
+    r.rlim_cur = r.rlim_max;
 
     if (setrlimit(RLIMIT_NOFILE, &r)) {
         if (errno == EPERM)
@@ -55,6 +53,23 @@ RaiseNofileResult raise_nofile_rlimit() {
     }
 
     return {RaiseNofileResult::Outcome::Raised, 0};
+}
+
+std::string nofile_fatal_message(const RaiseNofileResult& res) {
+    switch (res.outcome) {
+        case RaiseNofileResult::Outcome::Raised:
+            break;   // not an error; not reachable via this function
+        case RaiseNofileResult::Outcome::GetrlimitFailed:
+            return std::string("increment_nofile_rlimit: getrlimit (") + strerror(res.err) + ")";
+        case RaiseNofileResult::Outcome::PermissionDenied:
+            if (getuid() == 0 || geteuid() == 0)
+                return "system open file limit reached";
+            return "open file limit reached and unable to increase limit. retry as root";
+        case RaiseNofileResult::Outcome::SetrlimitFailed:
+            return std::string("increment_nofile_rlimit: setrlimit (") +
+                   strerror(res.err) + ")";
+    }
+    return "increment_nofile_rlimit: unexpected state";
 }
 
 } // namespace platform

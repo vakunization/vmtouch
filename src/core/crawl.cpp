@@ -58,7 +58,10 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
     }
 
     if (S_ISDIR(sb.st_mode)) {
-        // Loop check against the directory-inode stack.
+        // Loop check against the directory-inode stack. A linear scan is
+        // deliberate: depth is bounded by kMaxCrawlDepth (1024), so an
+        // unordered_set would cost more memory and cache misses than the
+        // scan costs comparisons.
         for (const ino_t ino : depth_stack_) {
             if (ino == sb.st_ino) {
                 emit(path, Failure::Kind::CrawlLoop, 0, visitor);
@@ -70,29 +73,28 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
             throw FatalError("maximum directory crawl depth reached: " + path);
 
         total_dirs_++;   // entered (counts even if opendir fails)
+
+        // RAII guard: pop the inode no matter how this directory's scope
+        // ends (opendir failure, closedir failure, early return, exception).
+        // Without it an early return leaks the inode onto the stack and
+        // corrupts loop detection for every subsequent directory.
+        struct DepthPop {
+            std::vector<ino_t>& stack;
+            ~DepthPop() { stack.pop_back(); }
+        } depth_pop{depth_stack_};
         depth_stack_.push_back(sb.st_ino);
 
         DIR* dirp = opendir(cpath);
 
-        if (dirp == NULL) {
+        if (dirp == nullptr) {
             if (errno == ENFILE || errno == EMFILE) {
                 const auto r = platform::raise_nofile_rlimit();
-                if (r.outcome == platform::RaiseNofileResult::Outcome::Raised) {
-                    dirp = opendir(cpath);   // single retry
-                } else if (r.outcome == platform::RaiseNofileResult::Outcome::PermissionDenied) {
-                    if (getuid() == 0 || geteuid() == 0)
-                        throw FatalError("system open file limit reached");
-                    throw FatalError("open file limit reached and unable to increase limit. retry as root");
-                } else {
-                    throw FatalError(std::string("increment_nofile_rlimit: ") +
-                                     (r.outcome == platform::RaiseNofileResult::Outcome::GetrlimitFailed
-                                          ? "getrlimit ("
-                                          : "setrlimit (") +
-                                     strerror(r.err) + ")");
-                }
+                if (r.outcome != platform::RaiseNofileResult::Outcome::Raised)
+                    throw FatalError(platform::nofile_fatal_message(r));
+                dirp = opendir(cpath);   // single retry
             }
 
-            if (dirp == NULL) {
+            if (dirp == nullptr) {
                 emit(path, Failure::Kind::OpendirFailed, errno, visitor);
                 return;
             }
@@ -104,19 +106,22 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
 
             std::string child;
             child.reserve(path.size() + 1 + strlen(de->d_name));
-            child += cpath;
-            child += '/';
-            child += de->d_name;
+            if (path.size() > 1 && path.back() == '/') {
+                child += cpath;       // path keeps its own separator
+                child += de->d_name;
+            } else {
+                child += cpath;
+                child += '/';
+                child += de->d_name;
+            }
 
             walk_impl(child, visitor);   // recursion: child is this frame's own copy
         }
 
         if (closedir(dirp)) {
             emit(path, Failure::Kind::Closedir, errno, visitor);
-            return;
+            return;   // depth_pop already popped the inode
         }
-
-        depth_stack_.pop_back();
     } else if (S_ISREG(sb.st_mode) || S_ISBLK(sb.st_mode)) {
         visitor(CrawlItem{std::string_view(path), nullptr});   // a file item
     } else {

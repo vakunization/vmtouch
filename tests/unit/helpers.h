@@ -68,7 +68,7 @@ struct WarningCapture {
     bool empty() const { return failures.empty(); }
     size_t size() const { return failures.size(); }
     // test-side formatter mirroring the CLI's format_failure (A1-drift fix:
-    // all 19 kinds carry the exact upstream site texts)
+    // all kinds carry the exact upstream site texts)
     static std::string format(const Failure& f) {
         switch (f.kind) {
             case Failure::Kind::Open:          return "unable to open " + f.path;
@@ -82,14 +82,13 @@ struct WarningCapture {
             case Failure::Kind::BeyondEof:     return "file " + f.path + " smaller than offset, skipping";
             case Failure::Kind::NotRegular:    return "skipping non-regular file: " + f.path;
             case Failure::Kind::Symlink:       return "not following symbolic link " + f.path;
-            case Failure::Kind::SeparateFs:    return "not recursing into separate filesystem " + f.path;
             case Failure::Kind::CrawlLoop:     return "symbolic link loop detected: " + f.path;
-            case Failure::Kind::PathTooLong:   return "path too long " + f.path;
-            case Failure::Kind::MincoreInaccurate: return "mincore inaccurate";
-            case Failure::Kind::EvictFailed:   return "unable to evict " + f.path;
             case Failure::Kind::EvictAdviseFailed:  return "unable to posix_fadvise file " + f.path;
             case Failure::Kind::EvictInvalidateFailed: return "unable to msync invalidate file " + f.path;
             case Failure::Kind::Closedir:      return "unable to closedir " + f.path;
+            case Failure::Kind::MlockFailed:   return "mlock: " + f.path;
+            case Failure::Kind::MincoreFailed: return "unable to mincore file " + f.path;
+            case Failure::Kind::Fatal:         return "FATAL: " + f.path;
         }
         return "";
     }
@@ -101,23 +100,23 @@ struct WarningCapture {
 // ---------------------------------------------------------------------------
 struct SharedSinkState {};
 
-inline std::unique_ptr<Session>
+inline std::unique_ptr<vmt::Session>
 make_session(std::shared_ptr<SharedSinkState>, WarningCapture& warn,
              const FileInfoRange& range = {}, bool quiet = false) {
     Options o;
     o.collect_failures = true;   // tests read failures via get_report()
     o.range = range;
-    auto s = std::make_unique<Session>(o);
+    auto s = std::make_unique<vmt::Session>(o);
     return s;
 }
 
-inline std::unique_ptr<Session>
+inline std::unique_ptr<vmt::Session>
 make_session(std::shared_ptr<SharedSinkState>, WarningCapture& warn,
              const Options& opts, const FileInfoRange& range = {}) {
     Options o = opts;
     o.collect_failures = true;
     if (range.offset || range.max_len) o.range = range;
-    auto s = std::make_unique<Session>(o);
+    auto s = std::make_unique<vmt::Session>(o);
     return s;
 }
 

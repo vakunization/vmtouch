@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <string>
+
 namespace platform {
 
 // Reads the page size once into ::pagesize. Must run before other core code.
@@ -16,27 +18,10 @@ bool aligned_p(const void* p);
 // mincore(2) vector bit 0 marks a resident page.
 bool is_mincore_page_resident(unsigned char mincore_byte);
 
-// Semantic kernel release version (major.minor), parsed from uname(2).
-struct KernelVersion {
-    int major = 0;
-    int minor = 0;
-
-    friend bool operator<(const KernelVersion& a, const KernelVersion& b) {
-        return a.major != b.major ? a.major < b.major : a.minor < b.minor;
-    }
-    friend bool operator>=(const KernelVersion& a, const KernelVersion& b) {
-        return !(a < b);
-    }
-};
-
-// Parses "X.Y.Z..." from a uname release string (e.g. "6.9.4-arch1").
-// Stops at the first non-digit segment boundary; missing parts are 0.
-KernelVersion parse_kernel_version(const char* release);
-
 // Outcome of raise_nofile_rlimit(); each gets its own user-facing message.
 struct RaiseNofileResult {
     enum class Outcome {
-        Raised,            // limit successfully increased
+        Raised,            // limit successfully increased (or already at max)
         GetrlimitFailed,   // getrlimit(2) failed (err = errno)
         SetrlimitFailed,   // setrlimit(2) failed, not permission (err = errno)
         PermissionDenied,  // setrlimit(2) failed with EPERM
@@ -45,7 +30,12 @@ struct RaiseNofileResult {
     int err = 0;           // errno, valid when outcome != Raised
 };
 
-// Bumps RLIMIT_NOFILE cur/max by one.
+// Bumps RLIMIT_NOFILE soft limit to the hard limit (the hard limit is never
+// touched). See platform.cpp for the reasoning.
 RaiseNofileResult raise_nofile_rlimit();
+
+// The user-facing fatal message for a failed raise (the historical upstream
+// texts). Callers throw FatalError with it.
+std::string nofile_fatal_message(const RaiseNofileResult& res);
 
 } // namespace platform

@@ -1,15 +1,11 @@
-// core/session.cpp — see session.h (spec2 §4).
+// core/session.cpp — see session.h.
 //
-// B4: the orchestrator. Two Report-update points (spec2 §4.6):
+// Report-update points:
 //   1. FileHandle::open failed -> failed++, failures[] (gated);
 //   2. cache::* returned Failed -> failed++, failures[] (gated).
 // Crawl errors arrive via CrawlItem.error and count as failed BEFORE any
 // total_files++ (they are not files). Ok absorbs the stats; Lock keeps
 // the region. Empty file: silent Ok (no failed, no record).
-//
-// Fatal boundary: catch_fatal_and_run catches FatalError, records
-// Failure{Kind::Fatal, err, path-ish-text} ALWAYS (not gated), sets
-// elapsed even on the fatal path, and returns Status::Fatal.
 
 #include "session.h"
 
@@ -17,13 +13,11 @@
 
 #include "file_handle.h"
 
-namespace {
+namespace vmt {
 
 double wall_seconds_since(const std::chrono::steady_clock::time_point& t) {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
 }
-
-} // namespace
 
 Session::Session(Options opts) : opts_(std::move(opts)) {}
 
@@ -38,10 +32,9 @@ Status Session::catch_fatal_and_run(const std::function<void(Report&)>& body, Re
         r.elapsed_seconds = wall_seconds_since(start);
         return Status::Ok;
     } catch (const FatalError& e) {
-        // The one fatal channel: ALWAYS recorded (not gated by
-        // collect_failures — the caller must be able to see what stopped
-        // the traversal). The engine's message text rides in `path`
-        // (kind=Fatal has no site path of its own).
+        // The one fatal channel: always recorded (not gated by
+        // collect_failures). The message text rides in `path` —
+        // kind=Fatal has no site path of its own.
         Failure f;
         f.kind = Failure::Kind::Fatal;
         f.err = 0;
@@ -51,19 +44,18 @@ Status Session::catch_fatal_and_run(const std::function<void(Report&)>& body, Re
         r.elapsed_seconds = wall_seconds_since(start);
         return Status::Fatal;
     }
-    // NIT-3 (2026-10-05): no catch-all — bad_alloc propagates (A-phase
-    // ruling restored over the B4 noexcept boundary).
+    // No catch-all: bad_alloc propagates to the caller.
 }
 
 Status Session::process(std::span<const std::string> paths) {
-    report_ = Report{};   // ONE call — ONE Report (reset at entry)
+    report_ = Report{};   // one call — one Report (reset at entry)
 
     return catch_fatal_and_run([&](Report& r) {
         // Per-call crawler state: dedup holds across ALL roots within the
-        // call (run.sh pins "hl hl2 -> Files: 1"), never across calls.
-        vmt::Crawler crawler;
+        // call, never across calls.
+        Crawler crawler;
 
-        auto visitor = [&](const vmt::CrawlItem& item) {
+        auto visitor = [&](const CrawlItem& item) {
             if (item.error != nullptr) {
                 // Traversal failure: not a file — no total_files++.
                 ++r.failed;
@@ -71,7 +63,7 @@ Status Session::process(std::span<const std::string> paths) {
                     r.failures.push_back(*item.error);
                 return;
             }
-            handle_file(item.path, r);   // NIT-4: no temporary std::string
+            handle_file(item.path, r);
         };
 
         for (const auto& root : paths)
@@ -82,13 +74,14 @@ Status Session::process(std::span<const std::string> paths) {
 }
 
 Status Session::process_fd(int fd, int64_t offset, int64_t max_len) {
-    report_ = Report{};   // same Report semantics as process() (owner amendment)
+    report_ = Report{};   // same Report semantics as process()
 
     return catch_fatal_and_run([&](Report& r) {
         if (fd < 0) {
             ++r.failed;
             if (opts_.collect_failures)
-                r.failures.push_back(Failure{Failure::Kind::Open, EBADF, "", offset});
+                r.failures.push_back(
+                    Failure{Failure::Kind::Open, EBADF, "bad fd (process_fd)", 0});
             return;
         }
 
@@ -104,18 +97,19 @@ Status Session::process_fd(int fd, int64_t offset, int64_t max_len) {
 void Session::handle_file(std::string_view path, Report& r) {
     ++r.total_files;   // discovered (before open) — includes empties and failures
 
-    auto opened = vmt::FileHandle::open(std::string(path));   // the one copy
+    std::string path_str(path);            // one copy, shared by open + record
+    auto opened = FileHandle::open(path_str);
     if (opened.is_error()) {
         ++r.failed;
         if (opts_.collect_failures) {
             Failure f = opened.error();
-            f.path = path;   // FileHandle carries the path already; belt and braces
+            f.path = path;
             r.failures.push_back(std::move(f));
         }
         return;
     }
 
-    if (run_verb_on_fd(opened.value().fd(), std::string(path), opts_.range, r))
+    if (run_verb_on_fd(opened.value().fd(), path_str, opts_.range, r))
         return;   // processed toward the goal
 
     ++r.failed;
@@ -123,32 +117,21 @@ void Session::handle_file(std::string_view path, Report& r) {
 
 bool Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRange& range,
                              Report& r) {
-    // Ok -> true (stats absorbed; Lock keeps the region).
-    // Failed -> false (Failure recorded, path attached here).
+    // Ok    -> true (stats absorbed; Lock keeps the region);
+    // Failed-> false (Failure recorded, path attached here);
     // Fatal -> throws (caught at the boundary).
     cache::Params params;
     params.range = range;
     params.max_file_size = opts_.max_file_size;
 
-    // Options::Verb (call policy, spec2 §2.1) -> cache::Verb (frozen engine
-    // vocabulary, docs/vocabulary.md). Two enums on purpose: the engine's
-    // is ABI-frozen; the Options one is free to grow CLI-level variants.
-    const cache::Verb verb = [&] {
+    // Verb dispatch. Options::Verb (call policy) selects the engine
+    // function directly — no second enum.
+    Result<cache::VerbOutcome> res = [&] {
         switch (opts_.verb) {
-            case Options::Verb::Inspect: return cache::Verb::Inspect;
-            case Options::Verb::Warm:    return cache::Verb::Warm;
-            case Options::Verb::Evict:   return cache::Verb::Evict;
-            case Options::Verb::Lock:    return cache::Verb::Lock;
-        }
-        throw FatalError("unreachable verb");
-    }();
-
-    vmt::Result<cache::VerbOutcome> res = [&] {
-        switch (verb) {
-            case cache::Verb::Inspect: return cache::inspect(fd, params);
-            case cache::Verb::Warm:    return cache::warm(fd, params);
-            case cache::Verb::Evict:   return cache::evict(fd, params);
-            case cache::Verb::Lock:    return cache::lock(fd, params);
+            case Options::Verb::Inspect: return cache::inspect(fd, params);
+            case Options::Verb::Warm:    return cache::warm(fd, params);
+            case Options::Verb::Evict:   return cache::evict(fd, params);
+            case Options::Verb::Lock:    return cache::lock(fd, params);
         }
         throw FatalError("unreachable verb");
     }();
@@ -169,3 +152,5 @@ bool Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRang
         kept_regions_.push_back(std::move(res.value().region));   // stays mapped
     return true;
 }
+
+} // namespace vmt
