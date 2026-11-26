@@ -9,7 +9,10 @@
 #include "core/session.h"
 
 #include <cerrno>
+#include <fstream>
 #include <memory>
+#include <sys/resource.h>
+#include <sys/stat.h>
 
 namespace {
 
@@ -30,6 +33,33 @@ struct Fixture {
 std::span<const std::string> span_of(const std::vector<std::string>& v) {
     return std::span<const std::string>(v);
 }
+
+struct DeepTree {
+    char root[sizeof("/tmp/vmtouch-depth-XXXXXX")] = "/tmp/vmtouch-depth-XXXXXX";
+    std::string leaf;
+
+    bool make(size_t dirs) {
+        if (!::mkdtemp(root))
+            return false;
+        leaf = root;
+        for (size_t i = 1; i < dirs; ++i) {
+            const std::string next = leaf + "/d";
+            if (::mkdir(next.c_str(), 0700) != 0)
+                return false;
+            leaf = next;
+        }
+        return true;
+    }
+
+    ~DeepTree() {
+        while (leaf.size() > std::char_traits<char>::length(root)) {
+            ::rmdir(leaf.c_str());
+            leaf.resize(leaf.size() - 2);
+        }
+        if (!leaf.empty())
+            ::rmdir(root);
+    }
+};
 
 } // namespace
 
@@ -93,6 +123,48 @@ TEST(session_report_resets_between_calls) {
     EXPECT_EQ(r2.total_pages, 3);   // not 5 — the Report was reset
 }
 
+TEST(session_hardlink_dedup_resets_between_calls) {
+    unit::TempFile original(1);
+    unit::TempFile alias(0);
+    EXPECT_EQ(::unlink(alias.path.c_str()), 0);
+    EXPECT_EQ(::link(original.path.c_str(), alias.path.c_str()), 0);
+    const std::vector<std::string> roots{original.path, alias.path};
+    Fixture fx;
+
+    EXPECT_EQ(fx.session->process(roots), Status::Ok);
+    EXPECT_EQ(fx.session->get_report().total_files, 1);
+    EXPECT_EQ(fx.session->process(roots), Status::Ok);
+    EXPECT_EQ(fx.session->get_report().total_files, 1);
+    EXPECT_EQ(fx.session->get_report().total_pages, 1);
+}
+
+TEST(session_fatal_keeps_partial_report_without_failure_collection) {
+    constexpr size_t max_depth = 1024;
+    struct rlimit limit{};
+    if (::getrlimit(RLIMIT_NOFILE, &limit) != 0 || limit.rlim_cur < max_depth + 16)
+        SKIP("soft descriptor limit too low to reach the traversal depth limit");
+    DeepTree tree;
+    const bool made_tree = tree.make(max_depth + 1);
+    EXPECT_TRUE(made_tree);
+    if (!made_tree)
+        return;
+
+    unit::TempFile file(1);
+    vmt::Session session(Options{.collect_failures = false});
+    const std::vector<std::string> roots{file.path, file.path + "/missing", tree.root};
+    EXPECT_EQ(session.process(roots), Status::Fatal);
+    const auto& report = session.get_report();
+    EXPECT_EQ(report.total_files, 1);
+    EXPECT_EQ(report.failed, 1);
+    EXPECT_EQ(report.total_pages, 1);
+    EXPECT_EQ(report.total_dirs, static_cast<int64_t>(max_depth));
+    EXPECT_EQ(report.failures.size(), size_t{1});
+    if (!report.failures.empty()) {
+        EXPECT_EQ(report.failures[0].kind, Failure::Kind::Fatal);
+        EXPECT_TRUE(report.failures[0].path.starts_with("maximum directory crawl depth reached:"));
+    }
+}
+
 TEST(session_range_selects_pages) {
     unit::TempFile f(3);
     FileInfoRange r;
@@ -146,6 +218,46 @@ TEST(session_process_fd_ok_and_report) {
     EXPECT_EQ(r.failed, 0);
     EXPECT_EQ(r.total_files, 0);                 // no path discovery for a raw fd
     EXPECT_TRUE(fx.session->get_report().failures.empty());
+}
+
+TEST(session_process_fd_does_not_close_borrowed_descriptor) {
+    unit::TempFile f(1);
+    {
+        Fixture fx;
+        EXPECT_EQ(fx.session->process_fd(f.fd, 0, 0), Status::Ok);
+        EXPECT_TRUE(::fcntl(f.fd, F_GETFD) >= 0);
+    }
+    EXPECT_TRUE(::fcntl(f.fd, F_GETFD) >= 0);
+}
+
+TEST(session_retains_lock_mapping_until_destruction) {
+#if defined(__linux__)
+    if (!std::ifstream("/proc/self/maps"))
+        SKIP("/proc/self/maps is unavailable");
+    unit::TempFile f(1);
+    const auto is_mapped = [&] {
+        std::ifstream maps("/proc/self/maps");
+        for (std::string line; std::getline(maps, line);) {
+            if (line.ends_with(f.path))
+                return true;
+        }
+        return false;
+    };
+    EXPECT_FALSE(is_mapped());
+    {
+        vmt::Session session(Options{.verb = Options::Verb::Lock, .collect_failures = true});
+        EXPECT_EQ(session.process_fd(f.fd, 0, 0), Status::Ok);
+        EXPECT_TRUE(session.get_report().failures.empty());
+        EXPECT_EQ(session.get_report().total_pages, 1);
+        EXPECT_TRUE(is_mapped());
+        EXPECT_EQ(session.process({}), Status::Ok);
+        EXPECT_EQ(session.get_report().total_pages, 0);
+        EXPECT_TRUE(is_mapped());
+    }
+    EXPECT_FALSE(is_mapped());
+#else
+    SKIP("checking file mappings requires Linux /proc/self/maps");
+#endif
 }
 
 TEST(session_process_fd_resets_report_like_process) {

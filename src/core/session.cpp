@@ -50,11 +50,10 @@ Status Session::catch_fatal_and_run(const std::function<void(Report&)>& body, Re
 Status Session::process(std::span<const std::string> paths) {
     report_ = Report{};   // one call — one Report (reset at entry)
 
-    return catch_fatal_and_run([&](Report& r) {
-        // Per-call crawler state: dedup holds across ALL roots within the
-        // call, never across calls.
-        Crawler crawler;
+    // Per-call crawler state: dedup holds across all roots within this call.
+    Crawler crawler;
 
+    const Status status = catch_fatal_and_run([&](Report& r) {
         auto visitor = [&](const CrawlItem& item) {
             if (item.error != nullptr) {
                 // Traversal failure: not a file — no total_files++.
@@ -68,9 +67,11 @@ Status Session::process(std::span<const std::string> paths) {
 
         for (const auto& root : paths)
             crawler.walk(root, visitor);
-
-        r.total_dirs = crawler.dirs_seen();
     }, report_);
+
+    // A FatalError may have interrupted the walk after entering directories.
+    report_.total_dirs = crawler.dirs_seen();
+    return status;
 }
 
 Status Session::process_fd(int fd, int64_t offset, int64_t max_len) {

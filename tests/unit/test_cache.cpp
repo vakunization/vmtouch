@@ -195,6 +195,20 @@ TEST(cache_lock_success_returns_live_region) {
     EXPECT_TRUE(r.value().region.unmap(err));
 }
 
+TEST(cache_mapped_region_destructor_unmaps_live_mapping) {
+    unit::TempFile f(1);
+    void* mem = mmap(nullptr, f.size, PROT_READ, MAP_SHARED, f.fd, 0);
+    EXPECT_TRUE(mem != MAP_FAILED);
+    if (mem == MAP_FAILED)
+        return;
+    unsigned char resident = 0;
+    {
+        cache::MappedRegion owner(mem, f.size);
+        EXPECT_EQ(mincore(mem, f.size, &resident), 0);
+    }
+    EXPECT_EQ(mincore(mem, f.size, &resident), -1);
+}
+
 TEST(cache_unmap_keeps_region_live_on_failure) {
     // MISS-1 regression (unmap option (a), 2026-10-05): a FAILED unmap must
     // NOT clear the handle — the region stays live so a retry genuinely
