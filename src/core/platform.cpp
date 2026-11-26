@@ -43,7 +43,7 @@ RaiseNofileResult raise_nofile_rlimit() {
     // raising rlim_max requires CAP_SYS_RESOURCE (unprivileged setrlimit would
     // always fail with EPERM), and rlim_max + 1 wraps RLIM_INFINITY to 0.
     if (r.rlim_cur >= r.rlim_max)   // already at the hard limit (incl. RLIM_INFINITY)
-        return {RaiseNofileResult::Outcome::Raised, 0};
+        return {RaiseNofileResult::Outcome::AlreadyAtLimit, 0};
     r.rlim_cur = r.rlim_max;
 
     if (setrlimit(RLIMIT_NOFILE, &r)) {
@@ -59,6 +59,8 @@ std::string nofile_fatal_message(const RaiseNofileResult& res) {
     switch (res.outcome) {
         case RaiseNofileResult::Outcome::Raised:
             break;   // not an error; not reachable via this function
+        case RaiseNofileResult::Outcome::AlreadyAtLimit:
+            return "open file limit reached (RLIMIT_NOFILE is already at its hard limit)";
         case RaiseNofileResult::Outcome::GetrlimitFailed:
             return std::string("increment_nofile_rlimit: getrlimit (") + strerror(res.err) + ")";
         case RaiseNofileResult::Outcome::PermissionDenied:

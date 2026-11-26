@@ -15,8 +15,8 @@ namespace vmt {
 class FileHandle {
 public:
     // Opens the path with O_RDONLY | O_NOATIME. On EPERM retries without
-    // O_NOATIME; on ENFILE/EMFILE raises RLIMIT_NOFILE and retries (a
-    // failed raise becomes FatalError). Any other error is
+    // O_NOATIME; on ENFILE/EMFILE retries only if RLIMIT_NOFILE was actually
+    // increased (otherwise throws FatalError). Any other error is
     // Failure{Kind::Open, errno, path}.
     static Result<FileHandle> open(const std::string& path);
 

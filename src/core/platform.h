@@ -21,13 +21,14 @@ bool is_mincore_page_resident(unsigned char mincore_byte);
 // Outcome of raise_nofile_rlimit(); each gets its own user-facing message.
 struct RaiseNofileResult {
     enum class Outcome {
-        Raised,            // limit successfully increased (or already at max)
+        Raised,            // soft limit successfully increased
+        AlreadyAtLimit,    // soft limit is already at the hard limit
         GetrlimitFailed,   // getrlimit(2) failed (err = errno)
         SetrlimitFailed,   // setrlimit(2) failed, not permission (err = errno)
         PermissionDenied,  // setrlimit(2) failed with EPERM
     };
     Outcome outcome;
-    int err = 0;           // errno, valid when outcome != Raised
+    int err = 0;           // errno for a failed getrlimit or setrlimit call
 };
 
 // Bumps RLIMIT_NOFILE soft limit to the hard limit (the hard limit is never

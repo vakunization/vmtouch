@@ -9,12 +9,16 @@
 #include "test.h"
 #include "helpers.h"
 
+#include "core/crawl.h"
 #include "core/file_handle.h"
 #include "core/result.h"
 
+#include <array>
 #include <cerrno>
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>   // chmod
+#include <sys/wait.h>
 #include <unistd.h>
 
 // ---------------------------------------------------------------------------
@@ -81,6 +85,61 @@ TEST(file_handle_open_unreadable_file_error_enoent_style) {
     EXPECT_TRUE(r.is_error());
     EXPECT_EQ((int)r.error().kind, (int)Failure::Kind::Open);
     EXPECT_EQ(r.error().err, EACCES);
+}
+
+TEST(file_and_directory_open_stop_at_hard_descriptor_limit) {
+#ifdef __SANITIZE_ADDRESS__
+    // The sanitizer runtime can try to create its own pipe while the
+    // process is out of descriptors. Exercise real exhaustion in plain CI.
+    SKIP("ASan runtime itself needs spare descriptors");
+#endif
+    unit::TempFile file(1);
+    const pid_t child = ::fork();
+    EXPECT_TRUE(child >= 0);
+    if (child < 0)
+        return;
+    if (child == 0) {
+        ::alarm(5);   // A regression must fail the test, not hang the suite.
+        const struct rlimit limit{32, 32};
+        if (::setrlimit(RLIMIT_NOFILE, &limit) != 0)
+            _exit(2);
+        std::array<int, 32> occupied{};
+        size_t count = 0;
+        const int result = [&] {
+            while (count < occupied.size()) {
+                const int fd = ::open("/dev/null", O_RDONLY);
+                if (fd < 0)
+                    break;
+                occupied[count++] = fd;
+            }
+            if (count == occupied.size() || errno != EMFILE)
+                return 3;
+            try {
+                auto opened = vmt::FileHandle::open(file.path);
+                (void)opened;
+                return 4;
+            } catch (const FatalError&) {
+            }
+            try {
+                vmt::Crawler crawler;
+                crawler.walk(".", [](const vmt::CrawlItem&) {});
+                return 5;
+            } catch (const FatalError&) {
+                return 0;
+            }
+        }();
+        // Sanitizer exit hooks may need descriptors of their own.
+        while (count > 0) {
+            ::close(occupied[--count]);
+        }
+        ::alarm(0);
+        _exit(result);
+    }
+    int status = 0;
+    EXPECT_EQ(::waitpid(child, &status, 0), child);
+    EXPECT_TRUE(WIFEXITED(status));
+    if (WIFEXITED(status))
+        EXPECT_EQ(WEXITSTATUS(status), 0);
 }
 
 // ---------------------------------------------------------------------------

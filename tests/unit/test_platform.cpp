@@ -10,6 +10,7 @@
 
 #include <cerrno>
 #include <sys/resource.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 // The CLI's parse helpers live in main.cpp; exercised here through the
@@ -42,23 +43,32 @@ TEST(mincore_resident_bit) {
     EXPECT_FALSE(platform::is_mincore_page_resident(0xFE));
 }
 
-TEST(raise_nofile_already_at_hard_limit_is_noop) {
-    // Soft limit already at the hard limit: the raise must report Raised
-    // (a no-op, not a failure) and must not touch the hard limit.
-    struct rlimit r;
-    if (getrlimit(RLIMIT_NOFILE, &r) != 0) {
-        SKIP("getrlimit failed");
+TEST(raise_nofile_reports_actual_progress_and_preserves_hard_limit) {
+    // Don't change resource limits in the unit runner itself.
+    using Outcome = platform::RaiseNofileResult::Outcome;
+    const pid_t child = ::fork();
+    EXPECT_TRUE(child >= 0);
+    if (child < 0)
+        return;
+    if (child == 0) {
+        const struct rlimit before{16, 32};
+        if (::setrlimit(RLIMIT_NOFILE, &before) != 0)
+            _exit(2);
+        if (platform::raise_nofile_rlimit().outcome != Outcome::Raised)
+            _exit(3);
+        struct rlimit after;
+        if (::getrlimit(RLIMIT_NOFILE, &after) != 0 ||
+            after.rlim_cur != before.rlim_max || after.rlim_max != before.rlim_max)
+            _exit(4);
+        if (platform::raise_nofile_rlimit().outcome != Outcome::AlreadyAtLimit)
+            _exit(5);
+        _exit(0);
     }
-    r.rlim_cur = r.rlim_max;
-    (void)setrlimit(RLIMIT_NOFILE, &r);   // best effort; EPERM below is fine
-
-    const auto res = platform::raise_nofile_rlimit();
-    EXPECT_TRUE(res.outcome == platform::RaiseNofileResult::Outcome::Raised ||
-                res.outcome == platform::RaiseNofileResult::Outcome::PermissionDenied);
-
-    struct rlimit after;
-    EXPECT_TRUE(getrlimit(RLIMIT_NOFILE, &after) == 0);
-    EXPECT_TRUE(after.rlim_max == r.rlim_max);   // hard limit untouched
+    int status = 0;
+    EXPECT_EQ(::waitpid(child, &status, 0), child);
+    EXPECT_TRUE(WIFEXITED(status));
+    if (WIFEXITED(status))
+        EXPECT_EQ(WEXITSTATUS(status), 0);
 }
 
 TEST(nofile_fatal_message_texts) {
