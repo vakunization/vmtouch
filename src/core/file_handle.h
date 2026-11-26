@@ -20,6 +20,9 @@ public:
     // Failure{Kind::Open, errno, path}.
     static Result<FileHandle> open(const std::string& path);
 
+    // Takes ownership of a descriptor returned by another POSIX API.
+    static FileHandle adopt(int fd) noexcept { return FileHandle(fd); }
+
     FileHandle(FileHandle&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
     FileHandle& operator=(FileHandle&& other) noexcept {
         if (this != &other) {
@@ -38,7 +41,7 @@ public:
     int fd() const { return fd_; }
 
 private:
-    explicit FileHandle(int fd) : fd_(fd) {}
+    explicit FileHandle(int fd) noexcept : fd_(fd) {}
 
     void close_fd() {
         if (fd_ >= 0) {

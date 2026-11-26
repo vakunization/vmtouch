@@ -290,6 +290,67 @@ fi
 out=$("$VMFILE" -v -p "100M-200M" "$T/ten" 2>&1); rc_is $? 0 "-p beyond EOF exits 0"
 has "$out" "smaller than offset" "-p beyond EOF warns"
 
+# --- daemon readiness, exit status, and pidfile lifecycle ---------------------
+
+pidfile="$T/daemon.pid"
+out=$(timeout 5 "$VMFILE" -d -w -l -P "$pidfile" "$T/one" 2>&1); rc=$?
+rc_is "$rc" 0 "-d -w parent returns success once child is ready"
+if [ -r "$pidfile" ]; then
+  daemon_pid=
+  read -r daemon_pid < "$pidfile"
+  if [[ "$daemon_pid" =~ ^[1-9][0-9]*$ ]] && kill -TERM "$daemon_pid" 2>/dev/null; then
+    ok "daemon pidfile identifies a live child"
+    for ((i=0; i<100; ++i)); do
+      [ -e "$pidfile" ] || break
+      sleep 0.05
+    done
+    if [ ! -e "$pidfile" ]; then
+      ok "daemon removes pidfile on termination"
+    else
+      fail "daemon removes pidfile on termination" "pidfile still exists"
+      kill -KILL "$daemon_pid" 2>/dev/null || true
+    fi
+  else
+    fail "daemon pidfile identifies a live child" "pid='$daemon_pid'"
+  fi
+else
+  fail "daemon creates pidfile before acknowledging readiness" "$out"
+fi
+
+out=$(timeout 5 "$VMFILE" -d -w -l -b "$T/no-such-list" 2>&1); rc=$?
+rc_is "$rc" 1 "-d -w propagates child's startup failure"
+has "$out" "unable to open batch list file" "child startup failure is reported"
+
+if [ "$(uname -s)" != Linux ] || [ ! -r "/proc/$$/task/$$/children" ]; then
+  skip "daemon EOF test requires Linux process children in procfs"
+elif mkfifo "$T/blocking-list"; then
+  "$VMFILE" -d -w -l -b "$T/blocking-list" >"$T/daemon-log" 2>&1 &
+  daemon_parent=$!
+  daemon_child=
+  for ((i=0; i<100; ++i)); do
+    children=$(cat "/proc/$daemon_parent/task/$daemon_parent/children" 2>/dev/null) || break
+    read -r daemon_child _ <<< "$children"
+    [ -z "$daemon_child" ] || break
+    sleep 0.05
+  done
+  if [[ "$daemon_child" =~ ^[1-9][0-9]*$ ]] && kill -KILL "$daemon_child" 2>/dev/null; then
+    for ((i=0; i<100; ++i)); do
+      kill -0 "$daemon_parent" 2>/dev/null || break
+      sleep 0.05
+    done
+    kill -KILL "$daemon_parent" 2>/dev/null || true
+    wait "$daemon_parent" 2>/dev/null; rc=$?
+    rc_is "$rc" 1 "-d -w treats status-pipe EOF as child failure"
+    has "$(cat "$T/daemon-log")" "closed status pipe" "status-pipe EOF is diagnosed"
+  else
+    kill -KILL "$daemon_parent" 2>/dev/null || true
+    wait "$daemon_parent" 2>/dev/null || true
+    fail "-d -w EOF fixture" "could not identify and stop the child"
+  fi
+else
+  fail "-d -w EOF fixture" "could not create the blocking FIFO"
+fi
+
 # --- mlock failure = per-file warning (DEV-1, 2026-10-05) ---------------------
 
 # lock a file far above the memlock rlimit: mlock fails non-retryably (ENOMEM)

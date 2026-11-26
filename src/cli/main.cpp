@@ -33,51 +33,45 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #include <format>
 #include <fstream>
 #include <iostream>
-#include <memory>       // unique_ptr for g_session
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include <climits>      // PATH_MAX
 #include <signal.h>
 #include <sys/mman.h>   // mlockall
 #include <sys/select.h>
-#include <sys/time.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include "cli_options.h"
 #include "core/common.h"
+#include "core/file_handle.h"
 #include "core/platform.h"
 #include "core/session.h"
 
-// Daemon mode plumbing: the exit pipe (child -> parent status byte) and
-// the child's pid. Zeroed pid means "not a daemon parent".
+// Only a waiting parent and its daemon child need a status pipe.
 struct DaemonChannel {
-  int exit_pipe[2] = {-1, -1};
-  int daemon_pid = 0;
+  std::optional<vmt::FileHandle> reader;
+  std::optional<vmt::FileHandle> writer;
 
-  // Child side: deliver the daemon's status byte to a -w parent. One
-  // predicate for every exit path (normal exit, fatal, catch handler):
-  // the daemon child is the only process with daemon_pid == 0, and the
-  // pipe exists only in daemon mode. Both pipe ends were inherited from
-  // the pre-fork parent, so the write cannot SIGPIPE even if the parent
-  // is already gone (or never waited).
-  void send_exit_status(char code) const {
-    if (daemon_pid == 0 && exit_pipe[1] != -1) {
-      if (write(exit_pipe[1], &code, 1) < 0)
-        std::fputs("vmtouch: FATAL: write\n", stderr);
-    }
+  // Sends at most one status byte, then closes the writer. A parent that
+  // has already gone away is not a reason to stop the daemon.
+  void send_exit_status(char code) noexcept {
+    if (!writer || reader)
+      return;
+    ssize_t n;
+    do {
+      n = ::write(writer->fd(), &code, 1);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0 && errno != EPIPE)
+      std::fputs("vmtouch: FATAL: write\n", stderr);
+    writer.reset();
   }
 };
 
-DaemonChannel g_daemon;
-
-// Set by the pidfile signal handler; the main flow performs the actual
-// unlink after the blocking wait (async-signal-safe: no library calls here).
+// Set by the signal handler; the main flow handles pidfile removal.
 static volatile sig_atomic_t g_pidfile_needs_removal = 0;
-static char g_pidfile_path[PATH_MAX] = {0};
 
 // Error-path usage goes to stderr so `vmtouch --bogus 2>err.log` is useful.
 [[noreturn]] static void usage(int code) {
@@ -178,39 +172,12 @@ static void reopen_all() {
     fatal(std::format("freopen: {}", errno_message(errno)));
 }
 
-// Waits for the daemon child's status byte. A signal that interrupts
-// select() lands here too — the pidfile flag is checked on return.
-static int wait_for_child(const DaemonChannel& d) {
-  char exit_value = 0;
-
-  while (true) {
-    struct timeval tv;
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    FD_SET(d.exit_pipe[0], &rfds);
-    if (select(d.exit_pipe[0] + 1, &rfds, nullptr, nullptr, &tv) < 0) {
-      if (errno == EINTR)
-        continue;   // signal (e.g. pidfile cleanup request): loop re-checks
-      fatal(std::format("select: {}", errno_message(errno)));
-    }
-
-    // Readability wins over waitpid: the daemon writes its status byte
-    // BEFORE exiting, so a readable pipe is the authoritative outcome.
-    // Checking waitpid first would race that window and misreport a clean
-    // shutdown as unexpected.
-    if (FD_ISSET(d.exit_pipe[0], &rfds))
-      break;
-
-    int wait_status = 0;
-    const pid_t wr = waitpid(d.daemon_pid, &wait_status, WNOHANG);
-    if (wr < 0 && errno != EINTR)
-      fatal(std::format("waitpid: {}", errno_message(errno)));
-    if (wr > 0)
-      fatal("daemon shut down unexpectedly");   // exited without a status byte
-  }
-  const ssize_t n = read(d.exit_pipe[0], &exit_value, 1);
+static int wait_for_child(const vmt::FileHandle& reader) {
+  unsigned char exit_value = 0;
+  ssize_t n;
+  do {
+    n = ::read(reader.fd(), &exit_value, 1);
+  } while (n < 0 && errno == EINTR);
   if (n < 0)
     fatal(std::format("read: {}", errno_message(errno)));
   if (n == 0)   // EOF: child closed the pipe without writing a status byte
@@ -218,29 +185,38 @@ static int wait_for_child(const DaemonChannel& d) {
   return exit_value;
 }
 
-void go_daemon(CliOptions& o) {
-  // The pipe must exist before fork(): the child reports its status byte
-  // through it. Created only in daemon mode — non-daemon runs never need it.
-  if (pipe(g_daemon.exit_pipe))
-    fatal(std::format("pipe: {}", errno_message(errno)));
+// The parent returns an exit status; the child returns no status and runs.
+static std::optional<int> go_daemon(const CliOptions& o, DaemonChannel& channel) {
+  if (o.wait) {
+    int ends[2];
+    if (::pipe(ends) != 0)
+      fatal(std::format("pipe: {}", errno_message(errno)));
+    channel.reader.emplace(vmt::FileHandle::adopt(ends[0]));
+    channel.writer.emplace(vmt::FileHandle::adopt(ends[1]));
+  }
 
-  g_daemon.daemon_pid = fork();
-  if (g_daemon.daemon_pid == -1)
+  const pid_t child = ::fork();
+  if (child == -1)
     fatal(std::format("fork: {}", errno_message(errno)));
-  if (g_daemon.daemon_pid) {   // parent
-    // The parent never writes the status byte; closing its write end lets
-    // wait_for_child see a real EOF if the daemon dies without reporting.
-    ::close(g_daemon.exit_pipe[1]);
-    g_daemon.exit_pipe[1] = -1;
-    if (o.wait)
-      exit(wait_for_child(g_daemon));
-    exit(0);
+  if (child != 0) {
+    channel.writer.reset();
+    return o.wait ? wait_for_child(*channel.reader) : 0;
+  }
+
+  if (o.wait) {
+    struct sigaction ignore{};
+    ignore.sa_handler = SIG_IGN;
+    ::sigemptyset(&ignore.sa_mask);
+    if (::sigaction(SIGPIPE, &ignore, nullptr) < 0)
+      fatal(std::format("sigaction: {}", errno_message(errno)));
+    channel.reader.reset();
   }
 
   if (setsid() == -1)
     fatal(std::format("setsid: {}", errno_message(errno)));
 
   if (!o.wait) reopen_all();
+  return std::nullopt;
 }
 
 
@@ -346,7 +322,6 @@ FileInfoRange parse_range(std::string_view inp) {
   return f;
 }
 
-static std::unique_ptr<vmt::Session> g_session;
 // Batch driver (-b): reads paths separated by newline or NUL (-0) from a
 // list file or stdin ("-") and accumulates them into `extra`. Input-
 // driving is a CLI concern: the library only ever sees process() per path.
@@ -376,11 +351,11 @@ static void remove_pidfile(bool quiet, std::string_view path) {
   }
 }
 
-static void write_pidfile(const CliOptions& o) {
+static bool write_pidfile(const CliOptions& o) {
   std::ofstream f(std::string(o.pidfile));
   if (!f) {
     warning(o.quiet, std::format("unable to open pidfile {} ({})", o.pidfile, errno_message(errno)));
-    return;
+    return false;
   }
 
   f << getpid() << '\n';
@@ -389,41 +364,59 @@ static void write_pidfile(const CliOptions& o) {
   if (!f) {
     warning(o.quiet, std::format("unable to write to pidfile {} ({})", o.pidfile, errno_message(errno)));
     remove_pidfile(o.quiet, o.pidfile);
+    return false;
   }
+  return true;
 }
 
-// The handler must be async-signal-safe: it only raises a flag (and copies
-// the path into a fixed buffer BEFORE registration, so the handler touches
-// no heap and no streams). The main flow performs the unlink.
+// The handler is async-signal-safe: it only sets a flag.
 static void signal_handler_request_pidfile_removal(int) {
   g_pidfile_needs_removal = 1;
 }
 
-static void register_signals_for_pidfile(const CliOptions& o) {
-  const auto len = o.pidfile.copy(g_pidfile_path, sizeof(g_pidfile_path) - 1);
-  g_pidfile_path[len] = '\0';
-  if (len == sizeof(g_pidfile_path) - 1)
-    warning(o.quiet, std::format("pidfile path truncated to {} bytes", len));
+class PidfileSignals {
+public:
+  PidfileSignals() {
+    sigset_t managed{};
+    ::sigemptyset(&managed);
+    for (int signal : signals_)
+      ::sigaddset(&managed, signal);
+    if (::sigprocmask(SIG_BLOCK, &managed, &previous_) != 0)
+      fatal(std::format("sigprocmask: {}", errno_message(errno)));
 
-  struct sigaction sa = {};
-  sa.sa_handler = signal_handler_request_pidfile_removal;
-  if (sigaction(SIGINT, &sa, nullptr) < 0 ||
-      sigaction(SIGTERM, &sa, nullptr) < 0 ||
-      sigaction(SIGQUIT, &sa, nullptr) < 0) {
-    warning(o.quiet, std::format("unable to register signals for pidfile ({})", errno_message(errno)));
+    struct sigaction action{};
+    action.sa_handler = signal_handler_request_pidfile_removal;
+    ::sigemptyset(&action.sa_mask);
+    for (int signal : signals_) {
+      if (::sigaction(signal, &action, nullptr) < 0) {
+        const int err = errno;
+        ::sigprocmask(SIG_SETMASK, &previous_, nullptr);
+        fatal(std::format("sigaction: {}", errno_message(err)));
+      }
+    }
   }
-}
 
-// Main-flow counterpart of the signal flag: remove the pidfile if a signal
-// requested it, then report why (unless quiet).
-static void handle_pidfile_removal_request(const CliOptions& o) {
-  if (!g_pidfile_needs_removal)
-    return;
-  g_pidfile_needs_removal = 0;
-  if (unlink(g_pidfile_path) < 0 && errno != ENOENT) {
-    warning(o.quiet, std::format("unable to remove pidfile {} ({})", g_pidfile_path, errno_message(errno)));
+  ~PidfileSignals() { ::sigprocmask(SIG_SETMASK, &previous_, nullptr); }
+  PidfileSignals(const PidfileSignals&) = delete;
+  PidfileSignals& operator=(const PidfileSignals&) = delete;
+
+  void wait() const {
+    sigset_t wait_mask = previous_;
+    for (int signal : signals_)
+      ::sigdelset(&wait_mask, signal);
+
+    // Atomically unblock and wait so a signal delivered just before this
+    // call cannot leave the daemon parked with its cleanup flag already set.
+    while (!g_pidfile_needs_removal) {
+      if (::sigsuspend(&wait_mask) < 0 && errno != EINTR)
+        fatal(std::format("sigsuspend: {}", errno_message(errno)));
+    }
   }
-}
+
+private:
+  static constexpr int signals_[] = {SIGINT, SIGTERM, SIGQUIT};
+  sigset_t previous_{};
+};
 
 // Parses argv into CLI options, library options, and the range.
 // Returns the operand (path) list. Unknown flags and missing values
@@ -532,17 +525,16 @@ static void validate_cli(CliOptions& o, const std::vector<std::string_view>& ope
   }
 }
 
-// Maps CLI verb selection to library Options and builds the Session.
+// Maps CLI verb selection to library Options.
 // ONE process() call later carries all roots (argv + batch): cross-root
 // dedup + one Report.
-static std::unique_ptr<vmt::Session> make_session(const CliOptions& o, const Options& lib_opts) {
-  Options opts = lib_opts;
+static Options make_session_options(const CliOptions& o, Options opts) {
   opts.collect_failures = true;   // the CLI drains records (quiet gates printing)
   if (o.touch) opts.verb = Options::Verb::Warm;
   if (o.evict) opts.verb = Options::Verb::Evict;
   if (o.lock)  opts.verb = Options::Verb::Lock;
   if (o.lockall) opts.verb = Options::Verb::Warm;   // -L -> Warm; mlockall in the caller
-  return std::make_unique<vmt::Session>(opts);
+  return opts;
 }
 
 // Prints per-file warnings from the Report (quiet gates printing). The
@@ -603,27 +595,30 @@ static void print_summary(const vmt::Session::Report& rep, const CliOptions& o) 
   }
 }
 
-static int run(int argc, char **argv) {
+static int run(int argc, char **argv, DaemonChannel& daemon) {
   CliOptions o;          // CLI-level state (never rides on core Options)
   Options lib_opts;      // the library's Options (verb/range/max_file_size/collect)
 
   const std::vector<std::string_view> operands = parse_cli_args(argc, argv, o, lib_opts, lib_opts.range);
   validate_cli(o, operands);
 
-  g_session = make_session(o, lib_opts);
-
   // Must happen before fork(): mlock() is not inherited across fork().
-  if (o.daemon) go_daemon(o);
+  if (o.daemon) {
+    if (const auto parent_status = go_daemon(o, daemon))
+      return *parent_status;
+  }
+
+  vmt::Session session(make_session_options(o, lib_opts));
 
   std::vector<std::string> roots;
   if (!o.batch.empty()) read_batch_paths(o, roots);
   for (const std::string_view op : operands)
     roots.emplace_back(op);
 
-  const Status st = g_session->process(roots);
-  print_failure_warnings(*g_session, o.quiet);
+  const Status st = session.process(roots);
+  print_failure_warnings(session, o.quiet);
 
-  const vmt::Session::Report& rep = g_session->get_report();
+  const vmt::Session::Report& rep = session.get_report();
 
   if (st == Status::Fatal) {
     // The Fatal record is always stored, never gated.
@@ -633,7 +628,7 @@ static int run(int argc, char **argv) {
         break;
       }
     }
-    g_daemon.send_exit_status(1);
+    daemon.send_exit_status(1);
     return 1;
   }
 
@@ -643,20 +638,27 @@ static int run(int argc, char **argv) {
         fatal(std::format("unable to mlockall ({})", errno_message(errno)));
     }
 
-    if (!o.pidfile.empty()) {
-      register_signals_for_pidfile(o);
-      write_pidfile(o);
-    }
-
     if (!o.quiet)
       std::cout << std::format("LOCKED {} pages ({})\n", rep.total_pages, pretty_print_size(pages_to_bytes(rep.total_pages)));
 
-    if (o.wait) reopen_all();
-
-    g_daemon.send_exit_status(0);
-    select(0, nullptr, nullptr, nullptr, nullptr);   // stay resident; signals interrupt this
-    handle_pidfile_removal_request(o);   // async-signal-safe cleanup point
-    exit(0);
+    std::optional<PidfileSignals> pidfile_signals;
+    if (!o.pidfile.empty())
+      pidfile_signals.emplace();
+    // Redirect before writing the pidfile so a redirection failure cannot
+    // leave a stale pidfile behind in the waiting-daemon path.
+    if (o.wait) {
+      std::cout.flush();
+      reopen_all();
+    }
+    const bool owns_pidfile = pidfile_signals && write_pidfile(o);
+    daemon.send_exit_status(0);
+    if (pidfile_signals)
+      pidfile_signals->wait();
+    else
+      select(0, nullptr, nullptr, nullptr, nullptr);   // stay resident until a signal
+    if (owns_pidfile)
+      remove_pidfile(o.quiet, o.pidfile);
+    return 0;
   }
 
   print_summary(rep, o);
@@ -667,15 +669,16 @@ int main(int argc, char **argv) {
   // Single fatal handler for the whole program: FatalError thrown anywhere
   // (option parsing, crawl, cache ops) lands here; bad_alloc and other
   // std::exceptions get a message instead of std::terminate.
+  DaemonChannel daemon;
   try {
-    return run(argc, argv);
+    return run(argc, argv, daemon);
   } catch (const FatalError& e) {
     std::cerr << std::format("vmtouch: FATAL: {}\n", e.what());
-    g_daemon.send_exit_status(1);
+    daemon.send_exit_status(1);
     return 1;
   } catch (const std::exception& e) {
     std::cerr << std::format("vmtouch: FATAL: {}\n", e.what());
-    g_daemon.send_exit_status(1);
+    daemon.send_exit_status(1);
     return 1;
   }
 }
