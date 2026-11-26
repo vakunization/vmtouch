@@ -20,6 +20,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -166,6 +167,43 @@ TEST(crawl_missing_root_emits_stat_error) {
     EXPECT_EQ(c.errors[0].err, ENOENT);
 }
 
+TEST(crawl_throwing_visitor_closes_all_open_directories) {
+    TempDir tree;
+    tree.mkdir("nested");
+    tree.mkfile("nested/file", 1);
+    unit::TempFile probe(0);
+
+    // dup returns the lowest free descriptor. Probe both slots used by
+    // the outer and nested directory streams.
+    const auto free_slots = [&] {
+        const std::array slots{::dup(probe.fd), ::dup(probe.fd)};
+        for (const int fd : slots) {
+            EXPECT_TRUE(fd >= 0);
+            if (fd >= 0)
+                ::close(fd);
+        }
+        return slots;
+    };
+    const auto before = free_slots();
+
+    struct VisitorError {};
+    Crawler crawler;
+    EXPECT_THROWS_AS(crawler.walk(tree.path, [](const CrawlItem&) {
+        throw VisitorError{};
+    }), VisitorError);
+
+    const auto after = free_slots();
+    EXPECT_EQ(after[0], before[0]);
+    EXPECT_EQ(after[1], before[1]);
+
+    TempDir next;
+    next.mkfile("file", 1);
+    Collected items;
+    crawler.walk(next.path, items.visitor());
+    EXPECT_TRUE(has_file(items, next.child("file")));
+    EXPECT_TRUE(items.errors.empty());
+}
+
 TEST(crawl_symlink_not_followed) {
     TempDir tree;
     tree.mkdir("d");
@@ -181,6 +219,23 @@ TEST(crawl_symlink_not_followed) {
     EXPECT_EQ((int)c.errors[0].kind, (int)Failure::Kind::Symlink);
     EXPECT_EQ(c.files.size(), (size_t)1);
     EXPECT_TRUE(has_file(c, tree.child("d/f")));
+}
+
+TEST(crawl_symlink_with_trailing_separators_is_not_followed) {
+    TempDir tree;
+    tree.mkdir("d");
+    tree.mkfile("d/f", 1);
+    tree.symlink("d", "link");
+
+    Crawler crawler;
+    Collected c;
+    crawler.walk(tree.child("link") + "///", c.visitor());
+
+    EXPECT_TRUE(c.files.empty());
+    EXPECT_EQ(c.errors.size(), (size_t)1);
+    if (!c.errors.empty())
+        EXPECT_EQ(c.errors[0].kind, Failure::Kind::Symlink);
+    EXPECT_EQ(crawler.dirs_seen(), 0);
 }
 
 TEST(crawl_hardlink_dedup_default_once) {

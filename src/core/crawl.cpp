@@ -7,7 +7,7 @@
 #include "crawl.h"
 
 #include <cerrno>
-#include <cstring>
+#include <memory>
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -16,8 +16,17 @@
 #include "platform.h"
 
 namespace vmt {
+namespace {
 
 constexpr int kMaxCrawlDepth = 1024;
+
+struct CloseDir {
+    void operator()(DIR* dir) const noexcept { (void)::closedir(dir); }
+};
+
+using DirHandle = std::unique_ptr<DIR, CloseDir>;
+
+} // namespace
 
 void Crawler::emit(const std::string& path, Failure::Kind kind, int32_t err,
                    const CrawlVisitor& visitor) {
@@ -32,8 +41,8 @@ void Crawler::walk(std::string path, const CrawlVisitor& visitor) {
 void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
     struct stat sb;
 
-    // strip a trailing slash (path is this frame's private copy)
-    if (path.size() > 1 && path.back() == '/')
+    // Strip trailing separators so lstat still inspects a symlink itself.
+    while (path.size() > 1 && path.back() == '/')
         path.pop_back();
     const char* cpath = path.c_str();
 
@@ -78,49 +87,46 @@ void Crawler::walk_impl(std::string& path, const CrawlVisitor& visitor) {
         // ends (opendir failure, closedir failure, early return, exception).
         // Without it an early return leaks the inode onto the stack and
         // corrupts loop detection for every subsequent directory.
+        depth_stack_.push_back(sb.st_ino);
         struct DepthPop {
             std::vector<ino_t>& stack;
             ~DepthPop() { stack.pop_back(); }
         } depth_pop{depth_stack_};
-        depth_stack_.push_back(sb.st_ino);
 
-        DIR* dirp = opendir(cpath);
+        DirHandle dir(opendir(cpath));
 
-        if (dirp == nullptr) {
+        if (!dir) {
             if (errno == ENFILE || errno == EMFILE) {
                 const auto r = platform::raise_nofile_rlimit();
                 if (r.outcome != platform::RaiseNofileResult::Outcome::Raised)
                     throw FatalError(platform::nofile_fatal_message(r));
-                dirp = opendir(cpath);   // single retry
+                dir.reset(opendir(cpath));   // single retry
             }
 
-            if (dirp == nullptr) {
+            if (!dir) {
                 emit(path, Failure::Kind::OpendirFailed, errno, visitor);
                 return;
             }
         }
 
-        while (struct dirent* de = readdir(dirp)) {
-            if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+        while (const auto* de = readdir(dir.get())) {
+            const std::string_view name(de->d_name);
+            if (name == "." || name == "..")
                 continue;
 
             std::string child;
-            child.reserve(path.size() + 1 + strlen(de->d_name));
-            if (path.size() > 1 && path.back() == '/') {
-                child += cpath;       // path keeps its own separator
-                child += de->d_name;
-            } else {
-                child += cpath;
+            child.reserve(path.size() + 1 + name.size());
+            child += path;
+            if (!path.ends_with('/'))
                 child += '/';
-                child += de->d_name;
-            }
+            child += name;
 
             walk_impl(child, visitor);   // recursion: child is this frame's own copy
         }
 
-        if (closedir(dirp)) {
+        // Report close errors on the normal path; the owner handles unwinding.
+        if (closedir(dir.release())) {
             emit(path, Failure::Kind::Closedir, errno, visitor);
-            return;   // depth_pop already popped the inode
         }
     } else if (S_ISREG(sb.st_mode) || S_ISBLK(sb.st_mode)) {
         visitor(CrawlItem{std::string_view(path), nullptr});   // a file item
