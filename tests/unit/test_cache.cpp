@@ -11,6 +11,7 @@
 
 #include "helpers.h"
 #include "core/cache.h"
+#include "core/cache_detail.h"
 
 #include <sys/mman.h>
 #include <sys/resource.h>   // getrlimit, RLIMIT_MEMLOCK
@@ -148,6 +149,108 @@ TEST(cache_evict_success_reports_stats_without_mapping) {
     EXPECT_TRUE(r.is_ok());
     EXPECT_EQ(r.value().stats.total_pages, 2);
     EXPECT_FALSE(static_cast<bool>(r.value().region));
+}
+
+TEST(cache_inspect_recovers_from_transient_errors) {
+    unit::TempFile f(1);
+    auto calls = cache::detail::real_syscalls();
+    int attempts = 0;
+    int pauses = 0;
+    calls.mincore = [&](void*, int64_t len, unsigned char* vec) {
+        EXPECT_EQ(len, f.size);
+        switch (++attempts) {
+            case 1: errno = EINTR; return -1;
+            case 2: errno = EAGAIN; return -1;
+            default: vec[0] = 1; return 0;
+        }
+    };
+    calls.pause_retry = [&] { ++pauses; };
+
+    auto result = cache::detail::inspect(f.fd, Params{}, calls);
+    EXPECT_TRUE(result.is_ok());
+    if (result.is_ok())
+        EXPECT_EQ(result.value().stats.total_pages_in_core, 1);
+    EXPECT_EQ(attempts, 3);
+    EXPECT_EQ(pauses, 1);    // EINTR retries immediately; EAGAIN waits.
+}
+
+TEST(cache_inspect_reports_failure_without_counting_residency) {
+    unit::TempFile f(1);
+    for (const int error : {EIO, EBUSY}) {
+        auto calls = cache::detail::real_syscalls();
+        int attempts = 0;
+        int pauses = 0;
+        calls.mincore = [&](void*, int64_t, unsigned char*) {
+            ++attempts;
+            errno = error;
+            return -1;
+        };
+        calls.pause_retry = [&] { ++pauses; };
+
+        auto result = cache::detail::inspect(f.fd, Params{}, calls);
+        EXPECT_TRUE(result.is_error());
+        if (result.is_error()) {
+            EXPECT_EQ(result.error().kind, Failure::Kind::MincoreFailed);
+            EXPECT_EQ(result.error().err, error);
+        }
+        EXPECT_EQ(attempts, error == EIO ? 1 : 3);
+        EXPECT_EQ(pauses, error == EIO ? 0 : 2);
+    }
+}
+
+TEST(cache_evict_passes_selected_range_and_preserves_advice_error) {
+#if defined(__linux__) || defined(__hpux)
+    unit::TempFile f(3);
+    const auto page_size = platform::page_size();
+    const Params p{.range = {page_size, page_size}};
+    auto calls = cache::detail::real_syscalls();
+    int attempts = 0;
+    calls.evict = [&](int fd, int64_t offset, const cache::MappedRegion& region) {
+        ++attempts;
+        EXPECT_EQ(fd, f.fd);
+        EXPECT_EQ(offset, page_size);
+        EXPECT_EQ(region.len(), page_size);
+        errno = ENOENT;   // posix_fadvise's return value must win over errno.
+        return EIO;
+    };
+
+    auto result = cache::detail::evict(f.fd, p, calls);
+    EXPECT_EQ(attempts, 1);
+    EXPECT_TRUE(result.is_error());
+    if (result.is_error()) {
+        EXPECT_EQ(result.error().kind, Failure::Kind::EvictAdviseFailed);
+        EXPECT_EQ(result.error().err, EIO);
+    }
+#else
+    SKIP("this platform does not use posix_fadvise for eviction");
+#endif
+}
+
+TEST(cache_inspect_reports_explicit_unmap_failure_and_unwinds_mapping) {
+    unit::TempFile f(1);
+    auto calls = cache::detail::real_syscalls();
+    int attempts = 0;
+    int pauses = 0;
+    void* mem = nullptr;
+    calls.unmap = [&](cache::MappedRegion& region, int& error) {
+        mem = region.mem();
+        error = (++attempts == 1) ? EAGAIN : EINVAL;
+        return false;
+    };
+    calls.pause_retry = [&] { ++pauses; };
+
+    auto result = cache::detail::inspect(f.fd, Params{}, calls);
+    EXPECT_TRUE(result.is_error());
+    if (result.is_error()) {
+        EXPECT_EQ(result.error().kind, Failure::Kind::MunmapFailed);
+        EXPECT_EQ(result.error().err, EINVAL);
+    }
+    EXPECT_EQ(attempts, 2);
+    EXPECT_EQ(pauses, 1);
+    EXPECT_TRUE(mem != nullptr);
+    unsigned char resident = 0;
+    if (mem)
+        EXPECT_EQ(mincore(mem, f.size, &resident), -1); // real destructor released it
 }
 
 // scenario: S3 (mlock model loader) — "tell me WHY mlock failed". Frozen

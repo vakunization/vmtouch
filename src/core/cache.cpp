@@ -1,6 +1,7 @@
 // core/cache.cpp — see cache.h.
 
 #include "cache.h"
+#include "cache_detail.h"
 
 #include <cerrno>
 #include <chrono>
@@ -32,6 +33,10 @@ bool is_retryable(int err) {
     return err == EINTR || err == EAGAIN || err == EBUSY;
 }
 
+const std::function<void()> pause_retry = [] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(kRetrySleepMs));
+};
+
 int64_t bytes2pages(int64_t bytes) {
     const auto page_size = platform::page_size();
     return bytes / page_size + (bytes % page_size != 0);
@@ -42,7 +47,8 @@ int64_t bytes2pages(int64_t bytes) {
 // own return value routed through errno for errno-less calls such as
 // posix_fadvise). Never throws: retryable-after-N is reported as a failure.
 template <typename Call>
-bool retry_op(Call&& call, int& out_err) {
+bool retry_op(Call&& call, int& out_err,
+              const std::function<void()>& pause = pause_retry) {
     int err = 0;
     for (int attempt = 0; attempt < kRetryAttempts; ++attempt) {
         errno = 0;   // each attempt classifies its own errno
@@ -54,7 +60,7 @@ bool retry_op(Call&& call, int& out_err) {
         if (!is_retryable(err))
             break;
         if (err != EINTR && attempt + 1 < kRetryAttempts)
-            std::this_thread::sleep_for(std::chrono::milliseconds(kRetrySleepMs));
+            pause();
     }
     out_err = err;
     return false;
@@ -142,13 +148,13 @@ vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok)
 // Counts resident pages in the mapped range. The retry_op result is
 // checked: on failure the caller gets Failed{MincoreFailed} rather than a
 // count derived from an unwritten buffer.
-vmt::Result<int64_t> mincore_count(const Mapping& m) {
+vmt::Result<int64_t> mincore_count(const Mapping& m, const detail::Syscalls& calls) {
     std::vector<unsigned char> mincore_array(m.pages_in_range);
 
     int err = 0;
     if (!retry_op([&] {
-            return mincore(m.region.mem(), m.len_of_range, mincore_array.data());
-        }, err))
+            return calls.mincore(m.region.mem(), m.len_of_range, mincore_array.data());
+        }, err, calls.pause_retry))
         return vmt::Result<int64_t>::Error(Failure{Failure::Kind::MincoreFailed, err, "", 0});
 
     int64_t pages_resident = 0;
@@ -176,17 +182,53 @@ void touch_pages(const Mapping& m) {
 // region is released by the destructor. Error ownership: unmap() reports
 // the raw errno through its out-param; retry_op owns the retry policy and
 // its out_err receives the same value on the first (non-retryable) failure.
-bool unmap_or_fail(MappedRegion& region, int& err) {
-    return retry_op([&] { return region.unmap(err) ? 0 : -1; }, err);
+bool unmap_or_fail(MappedRegion& region, int& err,
+                   const detail::Syscalls& calls = detail::real_syscalls()) {
+    return retry_op([&] {
+        int unmap_err = 0;
+        if (calls.unmap(region, unmap_err))
+            return 0;
+        errno = unmap_err;
+        return -1;
+    }, err, calls.pause_retry);
 }
 
 } // namespace
+
+const detail::Syscalls& detail::real_syscalls() {
+    static const Syscalls calls{
+        .mincore = [](void* mem, int64_t len, unsigned char* vec) {
+            return ::mincore(mem, len, vec);
+        },
+        .evict = [](int fd, int64_t offset, const MappedRegion& region) -> int {
+#if defined(__linux__) || defined(__hpux)
+            return ::posix_fadvise(fd, offset, region.len(), POSIX_FADV_DONTNEED);
+#elif defined(__FreeBSD__) || defined(__sun__) || defined(__APPLE__)
+            (void)fd;
+            (void)offset;
+            return ::msync(region.mem(), region.len(), MS_INVALIDATE) == 0 ? 0 : errno;
+#else
+            (void)fd;
+            (void)offset;
+            (void)region;
+            throw FatalError("cache eviction not (yet?) supported on this platform");
+#endif
+        },
+        .unmap = [](MappedRegion& region, int& err) { return region.unmap(err); },
+        .pause_retry = pause_retry,
+    };
+    return calls;
+}
 
 // ---------------------------------------------------------------------------
 // The four verbs.
 // ---------------------------------------------------------------------------
 
 vmt::Result<VerbOutcome> inspect(int fd, const Params& p) {
+    return detail::inspect(fd, p, detail::real_syscalls());
+}
+
+vmt::Result<VerbOutcome> detail::inspect(int fd, const Params& p, const Syscalls& calls) {
     Mapping m;
     bool empty = false;
     if (auto pr = prelude(fd, p, m, empty); pr.is_error())
@@ -194,7 +236,7 @@ vmt::Result<VerbOutcome> inspect(int fd, const Params& p) {
     if (empty)
         return vmt::Result<VerbOutcome>::Ok(VerbOutcome{});   // silent Ok, zero stats
 
-    auto resident = mincore_count(m);
+    auto resident = mincore_count(m, calls);
     if (resident.is_error())
         return vmt::Result<VerbOutcome>::Error(resident.error());
 
@@ -202,7 +244,7 @@ vmt::Result<VerbOutcome> inspect(int fd, const Params& p) {
     out.stats.total_pages = m.pages_in_range;
     out.stats.total_pages_in_core = resident.value();
     int munmap_err = 0;
-    if (!unmap_or_fail(m.region, munmap_err))
+    if (!unmap_or_fail(m.region, munmap_err, calls))
         return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::MunmapFailed, munmap_err, "", 0});
     return vmt::Result<VerbOutcome>::Ok(std::move(out));
 }
@@ -227,6 +269,10 @@ vmt::Result<VerbOutcome> warm(int fd, const Params& p) {
 }
 
 vmt::Result<VerbOutcome> evict(int fd, const Params& p) {
+    return detail::evict(fd, p, detail::real_syscalls());
+}
+
+vmt::Result<VerbOutcome> detail::evict(int fd, const Params& p, const Syscalls& calls) {
     Mapping m;
     bool empty = false;
     if (auto pr = prelude(fd, p, m, empty); pr.is_error())
@@ -234,32 +280,27 @@ vmt::Result<VerbOutcome> evict(int fd, const Params& p) {
     if (empty)
         return vmt::Result<VerbOutcome>::Ok(VerbOutcome{});
 
-    int err = 0;
 #if defined(__linux__) || defined(__hpux)
-    // posix_fadvise returns the error code and does not set errno, so the
-    // lambda routes its return value through errno for classification.
-    const bool ok = retry_op([&] {
-        const int rc = posix_fadvise(fd, p.range.offset, m.len_of_range, POSIX_FADV_DONTNEED);
-        if (rc != 0)
-            errno = rc;
-        return rc;
-    }, err);
-    if (!ok)
-        return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::EvictAdviseFailed, err, "", 0});
+    constexpr auto failure_kind = Failure::Kind::EvictAdviseFailed;
 #elif defined(__FreeBSD__) || defined(__sun__) || defined(__APPLE__)
-    const bool ok = retry_op([&] {
-        return msync(m.region.mem(), m.len_of_range, MS_INVALIDATE);
-    }, err);
-    if (!ok)
-        return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::EvictInvalidateFailed, err, "", 0});
+    constexpr auto failure_kind = Failure::Kind::EvictInvalidateFailed;
 #else
-    throw FatalError("cache eviction not (yet?) supported on this platform");
+    constexpr auto failure_kind = Failure::Kind::EvictAdviseFailed; // real adapter throws
 #endif
+    int err = 0;
+    // posix_fadvise returns its error, rather than setting errno.
+    if (!retry_op([&] {
+            const int rc = calls.evict(fd, p.range.offset, m.region);
+            if (rc != 0)
+                errno = rc;
+            return rc;
+        }, err, calls.pause_retry))
+        return vmt::Result<VerbOutcome>::Error(Failure{failure_kind, err, "", 0});
 
     VerbOutcome out;
     out.stats.total_pages = m.pages_in_range;
     int munmap_err = 0;
-    if (!unmap_or_fail(m.region, munmap_err))
+    if (!unmap_or_fail(m.region, munmap_err, calls))
         return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::MunmapFailed, munmap_err, "", 0});
     return vmt::Result<VerbOutcome>::Ok(std::move(out));
 }
