@@ -6,6 +6,19 @@ on:
   pull_request:
 
 jobs:
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --no-deps clang-format==18.1.8
+      - run: >
+          clang-format --dry-run --Werror
+          src/core/*.h src/core/*.cpp src/cli/*.h src/cli/*.cpp
+          tests/unit/*.h tests/unit/*.cpp
+
   test:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04

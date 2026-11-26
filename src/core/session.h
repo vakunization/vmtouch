@@ -27,68 +27,67 @@
 #include <string>
 #include <vector>
 
-#include "common.h"
 #include "cache.h"
+#include "common.h"
 #include "crawl.h"
 
 namespace vmt {
 
 class Session {
 public:
-    // The call result. Invariants:
-    //   total_files — files DISCOVERED (before open); includes empty files
-    //                 and files that later fail;
-    //   failed      — files not processed toward the goal (open/verb/crawl
-    //                 failures); empty files are NOT failed;
-    //   failures.size() == failed + (fatal ? 1 : 0) under collect_failures
-    //                 (the Fatal record is always appended);
-    //   elapsed_seconds — wall clock of the call, measured through fatals.
-    struct Report {
-        int64_t total_files = 0;
-        int64_t failed = 0;
-        int64_t total_dirs = 0;
-        int64_t total_pages = 0;
-        int64_t total_pages_in_core = 0;
-        double elapsed_seconds = 0.0;
-        std::vector<Failure> failures;   // gated by Options::collect_failures (+ always Fatal)
-    };
+  // The call result. Invariants:
+  //   total_files — files DISCOVERED (before open); includes empty files
+  //                 and files that later fail;
+  //   failed      — files not processed toward the goal (open/verb/crawl
+  //                 failures); empty files are NOT failed;
+  //   failures.size() == failed + (fatal ? 1 : 0) under collect_failures
+  //                 (the Fatal record is always appended);
+  //   elapsed_seconds — wall clock of the call, measured through fatals.
+  struct Report {
+    int64_t total_files = 0;
+    int64_t failed = 0;
+    int64_t total_dirs = 0;
+    int64_t total_pages = 0;
+    int64_t total_pages_in_core = 0;
+    double elapsed_seconds = 0.0;
+    std::vector<Failure> failures; // gated by Options::collect_failures (+ always Fatal)
+  };
 
-    explicit Session(Options opts);
-    ~Session();
+  explicit Session(Options opts);
+  ~Session();
 
-    Session(const Session&) = delete;
-    Session& operator=(const Session&) = delete;
+  Session(const Session &) = delete;
+  Session &operator=(const Session &) = delete;
 
-    // Traverses and processes all roots; order preserved. An empty list is
-    // valid (zeroed Report). Does not throw FatalError (converted to
-    // Status::Fatal internally); bad_alloc propagates.
-    Status process(std::span<const std::string> paths);
+  // Traverses and processes all roots; order preserved. An empty list is
+  // valid (zeroed Report). Does not throw FatalError (converted to
+  // Status::Fatal internally); bad_alloc propagates.
+  Status process(std::span<const std::string> paths);
 
-    // Caller-owned fd; same Report semantics as process(). Ranges must be
-    // non-negative and offsets page-aligned; invalid ranges fail with Map/EINVAL.
-    Status process_fd(int fd, int64_t offset, int64_t max_len);
+  // Caller-owned fd; same Report semantics as process(). Ranges must be
+  // non-negative and offsets page-aligned; invalid ranges fail with Map/EINVAL.
+  Status process_fd(int fd, int64_t offset, int64_t max_len);
 
-    // Borrowed report of the last process()/process_fd() call. Copy it to
-    // keep a snapshot across calls. Before any call: a zeroed Report.
-    const Report& get_report() const { return report_; }
+  // Borrowed report of the last process()/process_fd() call. Copy it to
+  // keep a snapshot across calls. Before any call: a zeroed Report.
+  const Report &get_report() const { return report_; }
 
 private:
-    // One discovered file: open -> dispatch -> classify (visitor body).
-    // Takes string_view — no extra copy per file.
-    void handle_file(std::string_view path, Report& r);
+  // One discovered file: open -> dispatch -> classify (visitor body).
+  // Takes string_view — no extra copy per file.
+  void handle_file(std::string_view path, Report &r);
 
-    // Verb dispatch + classification for an already-open fd. Does NOT
-    // close the fd. Returns false on Failed (the Failure is recorded);
-    // throws only for infrastructural causes.
-    bool run_verb_on_fd(int fd, const std::string& path, const FileInfoRange& range,
-                        Report& r);
+  // Verb dispatch + classification for an already-open fd. Does NOT
+  // close the fd. Returns false on Failed (the Failure is recorded);
+  // throws only for infrastructural causes.
+  bool run_verb_on_fd(int fd, const std::string &path, const FileInfoRange &range, Report &r);
 
-    // The boundary wrapper: catches FatalError -> Status::Fatal + record.
-    Status catch_fatal_and_run(const std::function<void(Report&)>& body, Report& r);
+  // The boundary wrapper: catches FatalError -> Status::Fatal + record.
+  Status catch_fatal_and_run(const std::function<void(Report &)> &body, Report &r);
 
-    Options opts_;
-    Report report_;                                  // last call's Report
-    std::vector<cache::MappedRegion> kept_regions_;  // owned for the lifetime of the Session
+  Options opts_;
+  Report report_;                                 // last call's Report
+  std::vector<cache::MappedRegion> kept_regions_; // owned for the lifetime of the Session
 };
 
 } // namespace vmt

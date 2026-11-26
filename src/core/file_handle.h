@@ -5,7 +5,7 @@
 
 #include <string>
 
-#include <unistd.h>   // ::close
+#include <unistd.h> // ::close
 
 #include "common.h"
 #include "result.h"
@@ -14,43 +14,43 @@ namespace vmt {
 
 class FileHandle {
 public:
-    // Opens the path with O_RDONLY | O_NOATIME. On EPERM retries without
-    // O_NOATIME; on ENFILE/EMFILE retries only if RLIMIT_NOFILE was actually
-    // increased (otherwise throws FatalError). Any other error is
-    // Failure{Kind::Open, errno, path}.
-    static Result<FileHandle> open(const std::string& path);
+  // Opens the path with O_RDONLY | O_NOATIME. On EPERM retries without
+  // O_NOATIME; on ENFILE/EMFILE retries only if RLIMIT_NOFILE was actually
+  // increased (otherwise throws FatalError). Any other error is
+  // Failure{Kind::Open, errno, path}.
+  static Result<FileHandle> open(const std::string &path);
 
-    // Takes ownership of a descriptor returned by another POSIX API.
-    static FileHandle adopt(int fd) noexcept { return FileHandle(fd); }
+  // Takes ownership of a descriptor returned by another POSIX API.
+  static FileHandle adopt(int fd) noexcept { return FileHandle(fd); }
 
-    FileHandle(FileHandle&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
-    FileHandle& operator=(FileHandle&& other) noexcept {
-        if (this != &other) {
-            close_fd();
-            fd_ = other.fd_;
-            other.fd_ = -1;
-        }
-        return *this;
+  FileHandle(FileHandle &&other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
+  FileHandle &operator=(FileHandle &&other) noexcept {
+    if (this != &other) {
+      close_fd();
+      fd_ = other.fd_;
+      other.fd_ = -1;
     }
+    return *this;
+  }
 
-    FileHandle(const FileHandle&) = delete;
-    FileHandle& operator=(const FileHandle&) = delete;
+  FileHandle(const FileHandle &) = delete;
+  FileHandle &operator=(const FileHandle &) = delete;
 
-    ~FileHandle() { close_fd(); }
+  ~FileHandle() { close_fd(); }
 
-    int fd() const { return fd_; }
+  int fd() const { return fd_; }
 
 private:
-    explicit FileHandle(int fd) noexcept : fd_(fd) {}
+  explicit FileHandle(int fd) noexcept : fd_(fd) {}
 
-    void close_fd() {
-        if (fd_ >= 0) {
-            ::close(fd_);
-            fd_ = -1;
-        }
+  void close_fd() {
+    if (fd_ >= 0) {
+      ::close(fd_);
+      fd_ = -1;
     }
+  }
 
-    int fd_ = -1;
+  int fd_ = -1;
 };
 
 } // namespace vmt

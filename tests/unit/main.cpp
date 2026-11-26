@@ -3,5 +3,5 @@
 #include "test.h"
 
 int main() {
-    return ::unit::run_all();
+  return ::unit::run_all();
 }

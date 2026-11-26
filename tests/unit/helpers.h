@@ -8,8 +8,8 @@
 #include <cstdio>
 #include <string>
 
-#include "test.h"
 #include "core/platform.h"
+#include "test.h"
 
 namespace unit {
 
@@ -17,24 +17,30 @@ namespace unit {
 // TempFile: RAII temp file of n pages, fd kept open for the test's lifetime.
 // ---------------------------------------------------------------------------
 struct TempFile {
-    std::string path;
-    int fd = -1;
-    int64_t size;   // bytes
+  std::string path;
+  int fd = -1;
+  int64_t size; // bytes
 
-    explicit TempFile(int n_pages)
-        : size(static_cast<int64_t>(n_pages) * platform::page_size()) {
-        char tmpl[] = "/tmp/vmtouch-unit-XXXXXX";
-        fd = mkstemp(tmpl);
-        if (fd == -1) { std::perror("mkstemp"); std::abort(); }
-        path = tmpl;
-        if (ftruncate(fd, size) == -1) { std::perror("ftruncate"); std::abort(); }
+  explicit TempFile(int n_pages) : size(static_cast<int64_t>(n_pages) * platform::page_size()) {
+    char tmpl[] = "/tmp/vmtouch-unit-XXXXXX";
+    fd = mkstemp(tmpl);
+    if (fd == -1) {
+      std::perror("mkstemp");
+      std::abort();
     }
-    ~TempFile() {
-        if (fd != -1) ::close(fd);
-        ::unlink(path.c_str());
+    path = tmpl;
+    if (ftruncate(fd, size) == -1) {
+      std::perror("ftruncate");
+      std::abort();
     }
-    TempFile(const TempFile&) = delete;
-    TempFile& operator=(const TempFile&) = delete;
+  }
+  ~TempFile() {
+    if (fd != -1)
+      ::close(fd);
+    ::unlink(path.c_str());
+  }
+  TempFile(const TempFile &) = delete;
+  TempFile &operator=(const TempFile &) = delete;
 };
 
 } // namespace unit
