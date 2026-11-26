@@ -262,6 +262,10 @@ vmt::Result<VerbOutcome> warm(int fd, const Params& p) {
     VerbOutcome out;
     out.stats.total_pages = m.pages_in_range;
     out.stats.total_pages_in_core = m.pages_in_range;   // all pages touched
+    if (p.retain_warm_mapping) {
+        out.region = std::move(m.region);
+        return vmt::Result<VerbOutcome>::Ok(std::move(out));
+    }
     int munmap_err = 0;
     if (!unmap_or_fail(m.region, munmap_err))
         return vmt::Result<VerbOutcome>::Error(Failure{Failure::Kind::MunmapFailed, munmap_err, "", 0});

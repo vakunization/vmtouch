@@ -60,11 +60,24 @@ TEST(cache_touch_makes_all_pages_resident) {
     auto r = cache::warm(f.fd, Params{});
     EXPECT_TRUE(r.is_ok());
     EXPECT_EQ(r.value().stats.total_pages, 3);
+    EXPECT_FALSE(static_cast<bool>(r.value().region));
     // After -t the file must be fully resident (upstream contract). Verify
     // via a fresh query on the same fd:
     auto q = cache::inspect(f.fd, Params{});
     EXPECT_EQ(q.value().stats.total_pages, 3);
     EXPECT_EQ(q.value().stats.total_pages_in_core, 3);   // touched => all resident
+}
+
+TEST(cache_warm_can_transfer_mapping_without_locking_it) {
+    unit::TempFile f(1);
+    const Params params{.range = {}, .retain_warm_mapping = true};
+    auto r = cache::warm(f.fd, params);
+    EXPECT_TRUE(r.is_ok());
+    if (!r.is_ok())
+        return;
+    EXPECT_EQ(r.value().stats.total_pages, 1);
+    EXPECT_TRUE(static_cast<bool>(r.value().region));
+    EXPECT_EQ(r.value().region.len(), f.size);
 }
 
 TEST(cache_empty_file_silent_ok_zero_stats) {

@@ -86,7 +86,7 @@ static volatile sig_atomic_t g_pidfile_needs_removal = 0;
       "  -t touch pages into memory\n"
       "  -e evict pages from memory\n"
       "  -l lock pages in physical memory with mlock(2)\n"
-      "  -L lock pages in physical memory with mlockall(2)\n"
+      "  -L retain target mappings and lock them with mlockall(2)\n"
       "  -d daemon mode\n"
       "  -m <size> max file size to touch\n"
       "  -p <range> use the specified portion instead of the entire file\n"
@@ -533,7 +533,10 @@ static Options make_session_options(const CliOptions& o, Options opts) {
   if (o.touch) opts.verb = Options::Verb::Warm;
   if (o.evict) opts.verb = Options::Verb::Evict;
   if (o.lock)  opts.verb = Options::Verb::Lock;
-  if (o.lockall) opts.verb = Options::Verb::Warm;   // -L -> Warm; mlockall in the caller
+  if (o.lockall) {
+    opts.verb = Options::Verb::Warm;
+    opts.retain_warm_mappings = true;   // mlockall runs later, with targets still mapped
+  }
   return opts;
 }
 

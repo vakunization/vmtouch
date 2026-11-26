@@ -42,6 +42,20 @@ has()    { grep -qF -- "$2" <<<"$1" && ok "$3" || fail "$3" "missing '$2' in: ${
 lacks()  { grep -qF -- "$2" <<<"$1" && fail "$3" "unexpected '$2'" || ok "$3"; }
 rc_is()  { [ "$1" = "$2" ] && ok "$3" || fail "$3" "got rc $1, want $2"; }
 
+plain_vmfile() {
+  # ASan intercepts the lock syscalls. Prefer an explicitly supplied plain
+  # binary, then the conventional sibling builds, then a plain VMFILE.
+  if [ -n "${VMFILE_PLAIN:-}" ] && [ -x "$VMFILE_PLAIN" ]; then
+    printf '%s\n' "$VMFILE_PLAIN"
+  elif [ -x "$(dirname "$VMFILE")/vmtouch-plain" ]; then
+    printf '%s\n' "$(dirname "$VMFILE")/vmtouch-plain"
+  elif [ -x "${VMFILE%build*}build-plain/vmtouch" ]; then
+    printf '%s\n' "${VMFILE%build*}build-plain/vmtouch"
+  elif [ ! -e "${VMFILE}.asan" ] && ! grep -qa __asan_init "$VMFILE" 2>/dev/null; then
+    printf '%s\n' "$VMFILE"
+  fi
+}
+
 # Summary readers (the ONLY output the CLI still produces per call).
 total_pages()  { printf '%s\n' "$1" | grep -oE 'TotalPages=[0-9]+' | head -1 | cut -d= -f2; }
 resident_pages() { printf '%s\n' "$1" | grep -oE 'ResidentPages=[0-9]+' | head -1 | cut -d= -f2; }
@@ -351,6 +365,50 @@ else
   fail "-d -w EOF fixture" "could not create the blocking FIFO"
 fi
 
+# --- lock-all retains and locks the actual file mapping ----------------------
+
+VMF=$(plain_vmfile)
+if [ "$(uname -s)" != Linux ] || [ ! -r "/proc/$$/smaps" ]; then
+  skip "-L mapping check needs Linux procfs smaps"
+elif [ -z "$VMF" ]; then
+  skip "-L mapping check needs a non-sanitizer binary (set VMFILE_PLAIN)"
+else
+  mk "$T/lockall-target" 1
+  pidfile="$T/lockall.pid"
+  out=$(timeout 5 "$VMF" -d -w -q -L -P "$pidfile" "$T/lockall-target" 2>&1); rc=$?
+  if [ "$rc" = 1 ] && [[ "$out" =~ unable\ to\ mlockall.*(Cannot\ allocate\ memory|Operation\ not\ permitted) ]]; then
+    skip "-L mapping check: host cannot mlockall within its memory lock limit"
+  else
+    rc_is "$rc" 0 "-L daemon acknowledges mlockall success"
+    lockall_pid=
+    if [ -r "$pidfile" ]; then
+      read -r lockall_pid < "$pidfile"
+    fi
+    if [[ "$lockall_pid" =~ ^[1-9][0-9]*$ ]]; then
+      if awk -v target="$T/lockall-target" '
+          /^[[:xdigit:]]+-[[:xdigit:]]+ / { mapping = ($NF == target) }
+          mapping && /^VmFlags:/ && /(^|[[:space:]])lo([[:space:]]|$)/ { locked = 1 }
+          END { exit !locked }' "/proc/$lockall_pid/smaps"; then
+        ok "-L keeps the target file mapping present and locked"
+      else
+        fail "-L keeps the target file mapping present and locked" "target missing or not locked"
+      fi
+      if kill -TERM "$lockall_pid" 2>/dev/null; then
+        for ((i=0; i<100; ++i)); do
+          [ -e "$pidfile" ] || break
+          sleep 0.05
+        done
+      fi
+      if [ -e "$pidfile" ]; then
+        fail "-L daemon stopped" "pidfile still exists"
+        kill -KILL "$lockall_pid" 2>/dev/null || true
+      fi
+    else
+      fail "-L daemon created a pidfile" "$out"
+    fi
+  fi
+fi
+
 # --- mlock failure = per-file warning (DEV-1, 2026-10-05) ---------------------
 
 # lock a file far above the memlock rlimit: mlock fails non-retryably (ENOMEM)
@@ -364,16 +422,6 @@ fi
 # binary: VMFILE_PLAIN env, a sibling build-plain/, or $VMFILE itself when it
 # is not sanitized.
 if [ "$(id -u)" != 0 ]; then
-  VMF=""
-  if [ -n "${VMFILE_PLAIN:-}" ] && [ -x "$VMFILE_PLAIN" ]; then
-    VMF="$VMFILE_PLAIN"
-  elif [ -x "$(dirname "$VMFILE")/vmtouch-plain" ]; then
-    VMF="$(dirname "$VMFILE")/vmtouch-plain"
-  elif [ -x "${VMFILE%build*}build-plain/vmtouch" ]; then
-    VMF="${VMFILE%build*}build-plain/vmtouch"
-  elif [ ! -e "${VMFILE}.asan" ] && ! grep -qa __asan_init "$VMFILE" 2>/dev/null; then
-    VMF="$VMFILE"   # VMFILE itself is not sanitized
-  fi
   if [ -n "$VMF" ]; then
     mk "$T/lockme" 25600   # 100 MB
     out=$(timeout 10 bash -c "ulimit -l 8; '$VMF' -l '$T/lockme'" 2>&1); rc=$?

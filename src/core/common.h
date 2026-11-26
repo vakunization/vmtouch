@@ -22,6 +22,7 @@ struct Options {
     FileInfoRange range{};               // {0,0} = whole file
     size_t max_file_size = SIZE_MAX;     // files larger are policy-skipped
     bool collect_failures = false;       // gate Report.failures (except Fatal)
+    bool retain_warm_mappings = false;   // Warm only; keep mappings until Session destruction
 };
 
 // Result codes returned by core entry points (cache/session).

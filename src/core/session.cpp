@@ -124,6 +124,7 @@ bool Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRang
     cache::Params params;
     params.range = range;
     params.max_file_size = opts_.max_file_size;
+    params.retain_warm_mapping = opts_.retain_warm_mappings;
 
     // Verb dispatch. Options::Verb (call policy) selects the engine
     // function directly — no second enum.
@@ -149,8 +150,8 @@ bool Session::run_verb_on_fd(int fd, const std::string& path, const FileInfoRang
     r.total_pages += res.value().stats.total_pages;
     r.total_pages_in_core += res.value().stats.total_pages_in_core;
 
-    if (opts_.verb == Options::Verb::Lock)
-        kept_regions_.push_back(std::move(res.value().region));   // stays mapped
+    if (res.value().region)
+        kept_regions_.push_back(std::move(res.value().region));
     return true;
 }
 

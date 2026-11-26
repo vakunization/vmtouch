@@ -15,8 +15,8 @@
 //   * ONE process/process_fd call fills ONE Report (reset at entry); the
 //     Report of a fatal call holds everything accumulated up to the
 //     failure point INCLUDING the Fatal record;
-//   * kept_regions_ (Lock) accumulates across calls; the Session must not
-//     be destroyed while the locks are needed;
+//   * kept_regions_ (Lock or retained Warm) accumulates across calls. The
+//     Session must outlive any mappings or locks the caller still needs.
 //   * collect_failures (Options) gates Report.failures EXCEPT the Fatal
 //     record, which is always stored (it is the only fatal channel).
 
@@ -88,7 +88,7 @@ private:
 
     Options opts_;
     Report report_;                                  // last call's Report
-    std::vector<cache::MappedRegion> kept_regions_;  // Lock: alive for process lifetime
+    std::vector<cache::MappedRegion> kept_regions_;  // owned for the lifetime of the Session
 };
 
 } // namespace vmt

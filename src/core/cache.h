@@ -4,8 +4,8 @@
 // page-cache syscalls live. No path, no CLI concepts.
 //
 // Return contract:
-//   * Ok    -> Result::Ok(VerbOutcome) — stats always; region ONLY for lock
-//              (inspect/warm/evict munmap inside themselves before return);
+//   * Ok    -> Result::Ok(VerbOutcome) — stats always; region for Lock or
+//              explicitly retained Warm. Other verbs unmap before return.
 //   * Fail  -> Result::Error(Failure) — err = the syscall's error code,
 //              path EMPTY (the caller attaches the path). Any syscall
 //              failure is a per-file Failed — non-retryable and
@@ -34,6 +34,7 @@ namespace cache {
 struct Params {
     FileInfoRange range;                    // -p: offset / max_len (0 = to EOF)
     size_t max_file_size = SIZE_MAX;        // -m (SIZE_MAX = unlimited)
+    bool retain_warm_mapping = false;
 };
 
 // What to do with the mapped pages: selected by Options::Verb in the
@@ -95,10 +96,10 @@ private:
     int64_t len_ = 0;
 };
 
-// Ok payload: stats for all four verbs; region only for lock.
+// Ok payload: stats for all four verbs; region for Lock or retained Warm.
 struct VerbOutcome {
     Stats stats;
-    MappedRegion region;   // Lock only; empty otherwise
+    MappedRegion region;
 };
 
 // The four verbs (fd is the only identity).
