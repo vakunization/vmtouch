@@ -7,7 +7,7 @@
 //  * EXPECT_* records a failure and continues; SKIP ends the current test.
 //  * Setup helpers shared by several suites live in helpers.h.
 //
-// Scenario lens (see docs/embedder-scenarios.md):
+// Scenario lens for the in-tree API (see DESIGN.md):
 //  * unit tests here serve S1-S3; friction with the current API found while
 //    writing them is tagged "// scenario:" for the Phase-3 API discussion.
 

@@ -92,10 +92,10 @@ static volatile sig_atomic_t g_pidfile_needs_removal = 0;
       "  -p <range> use the specified portion instead of the entire file\n"
       "  -b <list file> get files or directories from the list file\n"
       "  -0 in batch mode (-b) separate paths with NUL byte instead of newline\n"
-      "  -w wait until all pages are locked (only useful together with -d)\n"
+      "  -w wait for daemon startup status (requires -d)\n"
       "  -P <pidfile> write a pidfile (only useful together with -l or -L)\n"
       "  -o <type> output in machine friendly format.  'kv' for key=value pairs.\n"
-      "  -v verbose\n"
+      "  -v aggregate summary only (no per-file output)\n"
       "  -q quiet\n",
       VMTOUCH_VERSION);
   os.flush();
@@ -322,9 +322,8 @@ FileInfoRange parse_range(std::string_view inp) {
   return f;
 }
 
-// Batch driver (-b): reads paths separated by newline or NUL (-0) from a
-// list file or stdin ("-") and accumulates them into `extra`. Input-
-// driving is a CLI concern: the library only ever sees process() per path.
+// Batch input (-b) is a CLI concern. Read a list file or stdin ("-"), with
+// newline or NUL (-0) separators, before passing all roots in one call.
 // A list file that cannot be opened is fatal: the user asked for exactly
 // these paths, and silently producing an empty run (exit 0) would hide it.
 static void read_batch_paths(const CliOptions& o, std::vector<std::string>& extra) {
@@ -605,7 +604,7 @@ static int run(int argc, char **argv, DaemonChannel& daemon) {
   const std::vector<std::string_view> operands = parse_cli_args(argc, argv, o, lib_opts, lib_opts.range);
   validate_cli(o, operands);
 
-  // Must happen before fork(): mlock() is not inherited across fork().
+  // Fork before locking: memory locks are not inherited by the child.
   if (o.daemon) {
     if (const auto parent_status = go_daemon(o, daemon))
       return *parent_status;

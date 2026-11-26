@@ -1,4 +1,4 @@
-// core/cli_options.h — the CLI's own option state.
+// cli/cli_options.h — the CLI's own option state.
 //
 // Daemon/pidfile/batch/wait/output/quiet/verbose are CLI-level concerns
 // (process management + output policy), never library state.
@@ -10,7 +10,8 @@
 inline constexpr std::string_view VMTOUCH_VERSION = "1.3.1";
 
 struct CliOptions {
-    // Verb selection (validated: -t/-e/-l/-L are mutually exclusive).
+    // Lock modes imply touching; eviction cannot be combined with touching
+    // or locking, and the two lock modes cannot be combined.
     bool touch = false;      // -t
     bool evict = false;      // -e
     bool lock = false;       // -l

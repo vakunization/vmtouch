@@ -1,37 +1,40 @@
+# vmtouch
 
-> **Unofficial fork** of [vmtouch](https://github.com/hoytech/vmtouch) by Doug Hoyte.
-> Based on version 1.3.1.
-> Original license: BSD-3-Clause, Copyright 2009–2023 Doug Hoyte and contributors.
-> This fork is not affiliated with or endorsed by the original author.
+Inspect, warm, evict, or lock pages in the filesystem cache. This unofficial
+C++20 fork is based on [Doug Hoyte’s vmtouch 1.3.1](https://github.com/hoytech/vmtouch).
+It is not affiliated with upstream. The original C implementation is kept in
+[`vmtouch.c`](vmtouch.c) for reference and is not built.
 
+## Build and test
 
-## What is vmtouch
+Use CMake 3.16 or newer and a C++20 compiler and standard library with
+`std::format` support (for example, GCC/libstdc++ 13 or newer).
 
-vmtouch is a tool for learning about and controlling the file system cache of unix and unix-like systems. It is BSD licensed so you can basically do whatever you want with it.
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWARN_FLAGS=-Werror
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+cmake --install build
+```
 
+CTest runs the unit and CLI characterization suites. To keep fixtures on disk
+when the build directory is on tmpfs, set `VMTOUCH_TEST_DIR` to a writable,
+disk-backed directory. Configure a separate build with
+`-DVMFTOUCH_SANITIZE=ON` for ASan and UBSan. Set `VMFILE_PLAIN` to the absolute
+path to a plain binary to exercise the real lock syscalls in the sanitized CLI
+test run.
 
-### Install
+## Use
 
-    $ git clone https://github.com/hoytech/vmtouch.git
-    $ cd vmtouch
-    $ cmake -S . -B build
-    $ cmake --build build -j
-    $ sudo cmake --install build
+```sh
+vmtouch -o kv /path/to/file       # report resident and total pages
+vmtouch -t -p 0-16M /path/to/file # warm the selected range
+vmtouch -e /path/to/file         # request eviction; the OS may keep pages
+vmtouch -l /path/to/file         # lock pages; stay running to keep them locked
+```
 
-### Build options
+Run `vmtouch --help` or see the [manual](man/vmtouch.8) for all options.
+See the [changelog](CHANGELOG.md) for deliberate differences from upstream and
+the [design notes](DESIGN.md) for the in-tree C++ API.
 
-- `-DVMFTOUCH_SANITIZE=ON` — build with ASan+UBSan (development)
-- `ctest` in the build directory runs the unit tests and the CLI
-  characterization suite
-
-
-### More information
-
-* [Online manual](https://github.com/hoytech/vmtouch/blob/master/vmtouch.pod)
-* [System tuning parameters](https://github.com/hoytech/vmtouch/blob/master/TUNING.md)
-* [Original project](https://github.com/hoytech/vmtouch)
-
-
-### Authors
-
-Original vmtouch: copyright (c) 2009-2017 Doug Hoyte and contributors.
+BSD-3-Clause; see [LICENSE](LICENSE).

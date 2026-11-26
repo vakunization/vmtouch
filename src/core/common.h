@@ -25,15 +25,15 @@ struct Options {
     bool retain_warm_mappings = false;   // Warm only; keep mappings until Session destruction
 };
 
-// Result codes returned by core entry points (cache/session).
+// Result codes returned by Session entry points.
 enum class Status : int32_t {
     Ok = 0,     // call completed; per-file problems are in the Report
     Fatal = 1,  // traversal interrupted; Report holds everything + the Fatal record
 };
 
-// Error that stops the whole traversal (allocation failure, misaligned
-// mmap, unsupported platform). Caught at the Session boundary; the CLI
-// prints "vmtouch: FATAL: <msg>" and exits 1. The library never exits.
+// Infrastructure failure that stops a run (e.g. misaligned mmap, unsupported
+// platform, or traversal depth limit). Session converts this to Status::Fatal.
+// Other exceptions, including std::bad_alloc, can propagate to C++ callers.
 class FatalError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -41,20 +41,18 @@ public:
 
 // One recorded failure. The library reports facts; the CLI formats text.
 // Kind values are frozen — the Phase-3 C enum maps 1:1. Additions are
-// allowed; renumbering is not. (Kinds 8/10/11/12 were removed in 2026-10:
-// they had no producers; their historical texts remain documented in
-// docs/vocabulary.md.)
+// allowed; renumbering is not. The gaps left by removed kinds are intentional.
 struct Failure {
     enum class Kind : int32_t {
         Open = 1,             // unable to open
         Stat = 2,             // unable to stat (crawl lstat/stat)
-        Map = 3,              // unable to mmap
+        Map = 3,              // invalid mapping range or unable to mmap
         TooLarge = 4,         // file exceeds -m
         BeyondEof = 5,        // -p offset beyond EOF
         NotRegular = 6,       // skipping non-regular file
         Symlink = 7,          // not following symbolic link
         // 8 was SeparateFs (reserved, no producer)   — removed
-        CrawlLoop = 9,        // symbolic link loop detected
+        CrawlLoop = 9,        // detected a repeated directory on the active walk path
         // 10 was PathTooLong (reserved, no producer) — removed
         // 11 was MincoreInaccurate (no producer)     — removed
         // 12 was EvictFailed (superseded by 18/19)   — removed

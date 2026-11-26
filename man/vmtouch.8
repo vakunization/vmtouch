@@ -1,0 +1,89 @@
+.TH VMTOUCH 8
+.SH NAME
+vmtouch \- inspect, warm, evict, or lock filesystem cache pages
+.SH SYNOPSIS
+.B vmtouch
+.RI [ options ] " path " ...
+.SH DESCRIPTION
+Without an operation flag,
+.B vmtouch
+reports how many pages of the selected files are resident.
+Directories are traversed recursively. The walk skips symbolic links,
+crosses filesystem boundaries, and counts hardlinked files once per run.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print usage and exit.
+.TP
+.B \-t
+Warm the selected pages by reading one byte per page.
+.TP
+.B \-e
+Ask the operating system to evict the selected pages.
+Eviction is advisory and is not guaranteed.
+.TP
+.B \-l
+Warm and lock selected mappings with
+.BR mlock (2).
+The process stays running to keep its locks.
+.TP
+.B \-L
+Warm and retain the selected mappings, then lock current process mappings
+with
+.BR mlockall (2).
+The process stays running to keep its locks.
+.TP
+.BI \-m " size"
+Skip files larger than
+.IR size .
+.TP
+.BI \-p " range"
+Select part of each file. Use
+.IR size ,
+.IR start\-end ,
+or
+.IR start\- .
+Sizes are in bytes, with optional K, M, or G suffixes for powers of 1024.
+The starting offset is rounded down to a page boundary.
+.TP
+.BI \-b " file"
+Read paths from a batch file, or use
+.B \-
+for standard input.
+.TP
+.B \-0
+Use NUL rather than newline separators in batch input.
+.TP
+.B \-d
+Run in the background. Requires
+.B \-l
+or
+.BR \-L .
+.TP
+.B \-w
+With
+.BR \-d ,
+wait for the child to report startup success or failure.
+.TP
+.BI \-P " file"
+Write a pidfile for a locking run. The process removes it when handling
+SIGINT, SIGTERM, or SIGQUIT; it cannot clean up after SIGKILL.
+.TP
+.B \-o kv
+Print machine-readable key=value summary fields.
+.TP
+.B \-v
+Print aggregate output, without per-file residency charts.
+.TP
+.B \-q
+Suppress warnings and the summary. Fatal diagnostics still go to standard error.
+.SH EXIT STATUS
+Zero means the operation completed, possibly with warnings for individual
+files. One means invalid usage or a fatal failure. Without
+.BR \-w ,
+a daemon-launching parent does not wait for the child's outcome.
+.SH SEE ALSO
+.BR mincore (2),
+.BR mlock (2),
+.BR mlockall (2),
+.BR posix_fadvise (2)

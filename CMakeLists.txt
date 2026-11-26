@@ -42,6 +42,7 @@ include(GNUInstallDirs)
 install(TARGETS vmtouch
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+install(FILES man/vmtouch.8 DESTINATION ${CMAKE_INSTALL_MANDIR}/man8)
 
 # --- unit tests (dependency-free harness in tests/unit/) -----------------
 add_executable(unit_tests

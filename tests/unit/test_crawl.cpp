@@ -277,16 +277,14 @@ TEST(crawl_hardlink_dedup_across_walks_on_one_crawler) {
     ::unlink(alias);
 }
 
-TEST(crawl_symlink_loop_emits_loop_error_and_terminates) {
+TEST(crawl_symlink_pointing_to_ancestor_is_rejected) {
     TempDir tree;
     tree.mkdir("d");
     tree.mkfile("d/f", 1);
     tree.symlink(tree.path, "d/loop");   // d/loop -> tree root
 
     // Fixed policy: symlinks are never followed, so the loop is not
-    // traversed at all; the link itself yields a Symlink error and the
-    // walk terminates. (The inode-stack loop check remains in the code as
-    // defense in depth — spec2 §5.7 — but is unreachable without -f.)
+    // traversed at all; the link itself yields a Symlink error.
     Crawler crawler;
     Collected c;
     crawler.walk(tree.path, c.visitor());

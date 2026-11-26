@@ -3,16 +3,9 @@
 set -u -o pipefail
 export LC_ALL=C
 
-# B6: characterization suite for the vmtouch CLI on the ratified library
-# architecture (spec1/spec2 + owner rulings). The CLI contract:
-#   * -t/-e/-l/-L verbs, -m, -p, -b, -0, -P, -d/-w, -o kv, -v (totals-only),
-#     -q; -f/-F/-h/-i/-I REMOVED (rejected as unknown options);
-#   * per-file output is GONE — the summary (or kv line) is the whole story;
-#   * per-file problems arrive as WARNING lines on stderr; fatal as a
-#     FATAL line + exit 1.
-# Suite shape mirrors the pre-migration suite where the contract survived,
-# and asserts exit codes / summary counts where the old per-file echoes were
-# the only observable.
+# CLI characterization: check exit statuses, aggregate output, warnings,
+# and daemon lifecycle against the current fork contract (man/vmtouch.8).
+# The old -f/-F/-i/-I flags are rejected; -h now means help.
 
 VMFILE=${VMFILE:-./vmtouch}
 case $VMFILE in

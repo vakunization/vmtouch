@@ -8,14 +8,16 @@
 //              explicitly retained Warm. Other verbs unmap before return.
 //   * Fail  -> Result::Error(Failure) — err = the syscall's error code,
 //              path EMPTY (the caller attaches the path). Any syscall
-//              failure is a per-file Failed — non-retryable and
-//              retryable-after-N (3x50ms, EINTR/EAGAIN/EBUSY) alike;
-//              traversal continues. NOTE: a Failed verb contributes NO
+//              failure is a per-file Failed, whether retried or not.
+//              EINTR, EAGAIN, and EBUSY get at most three attempts;
+//              only EAGAIN and EBUSY wait 50 ms between attempts.
+//              Traversal continues. A Failed verb contributes no
 //              page stats — the file's pages never reach the Report
 //              (upstream counted them before the destructive step; this
 //              stricter semantics is intentional — document if it changes);
-//   * Fatal -> throw FatalError — infrastructure only: allocation failure,
-//              misaligned mmap, unsupported platform. Traversal stops.
+//   * Fatal -> throw FatalError for infrastructure errors such as
+//              misaligned mmap or an unsupported platform. Other exceptions
+//              such as std::bad_alloc can propagate.
 //
 // Empty file: silent Ok with zero stats and no region (no record).
 
@@ -36,9 +38,6 @@ struct Params {
     size_t max_file_size = SIZE_MAX;        // -m (SIZE_MAX = unlimited)
     bool retain_warm_mapping = false;
 };
-
-// What to do with the mapped pages: selected by Options::Verb in the
-// session (the dispatch calls inspect/warm/evict/lock directly).
 
 // Owning handle for a live mmap region. Move-only; the destructor munmaps
 // if live. unmap() is an explicit early munmap: it clears the handle only

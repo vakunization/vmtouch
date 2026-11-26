@@ -9,10 +9,11 @@
 //   * no filesystem-boundary check (cross freely);
 //   * hardlink dedup ENABLED (st_nlink > 1 seen by (dev, ino) -> skip);
 //   * MAX_CRAWL_DEPTH = 1024 (overflow -> FatalError);
-//   * symlink loops -> Failure{Kind::CrawlLoop}.
+//   * repeated directories on the active path can yield Kind::CrawlLoop;
+//     encountered symlinks are rejected before directory traversal.
 //
 // Lifetime: the caller creates one Crawler per process() call; the
-// seen-inodes tree and counters live for the Crawler's lifetime, so dedup
+// seen-inodes set and counters live for the Crawler's lifetime, so dedup
 // works ACROSS roots in one call.
 
 #pragma once

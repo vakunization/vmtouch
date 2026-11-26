@@ -13,10 +13,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-// The CLI's parse helpers live in main.cpp; exercised here through the
-// same rules they enforce (size/range parsing is contract, tested via
-// the pure helpers where possible).
-
 TEST(page_size_is_sane) {
     EXPECT_EQ(platform::page_size(), sysconf(_SC_PAGESIZE));
     EXPECT_TRUE(platform::page_size() > 0);

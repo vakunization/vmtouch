@@ -68,8 +68,8 @@ public:
     // non-negative and offsets page-aligned; invalid ranges fail with Map/EINVAL.
     Status process_fd(int fd, int64_t offset, int64_t max_len);
 
-    // The Report of the LAST process()/process_fd() call. Valid until the
-    // next call or destruction. Before any call: a zeroed Report.
+    // Borrowed report of the last process()/process_fd() call. Copy it to
+    // keep a snapshot across calls. Before any call: a zeroed Report.
     const Report& get_report() const { return report_; }
 
 private:

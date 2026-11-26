@@ -1,7 +1,7 @@
 // core/result.h — the minimal Result<T> used across the library.
 //
 // One error language: Ok carries the value; Error carries a Failure.
-// Exceptional situations are not carried here — they throw FatalError.
+// Exceptional situations are not carried here; they are thrown.
 // Hand-rolled instead of std::expected to stay C++20. The storage is
 // std::optional<T> (engages only on Ok), so move-only types like
 // FileHandle work without default construction. Accessing the wrong

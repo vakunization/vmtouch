@@ -1,8 +1,8 @@
 // core/crawl.cpp — see crawl.h.
 //
 // Traversal errors go to the VISITOR (CrawlItem), not to a Session.
-// Fatal cases (depth overflow, allocation failure, rlimit exhaustion)
-// throw FatalError with the historical message texts.
+// Depth overflow and descriptor exhaustion throw FatalError. Allocation
+// exceptions are not translated here.
 
 #include "crawl.h"
 
