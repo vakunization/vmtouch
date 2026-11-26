@@ -21,14 +21,19 @@ case $VMFILE in
 esac
 [ -x "$VMFILE" ] || { echo "not executable: $VMFILE" >&2; exit 2; }
 
-# Eviction tests need a real filesystem, not tmpfs.
-T=$(mktemp -d "$PWD/vmtouch-test.XXXXXX")
+# Eviction tests need a disk-backed filesystem, not tmpfs. Builds on tmpfs
+# can keep the executable there and point only test fixtures at a disk.
+fixture_dir=${VMTOUCH_TEST_DIR:-$PWD}
+T=$(mktemp -d "${fixture_dir%/}/vmtouch-test.XXXXXX") || exit 2
 trap 'rm -rf "$T"' EXIT
 case $(uname -s) in
   Linux)  fs=$(stat -f -c %T "$T" 2>/dev/null) ;;
-  *)      fs=$(df -T "$1" 2>/dev/null | awk 'NR==2{print $2}') ;;
+  *)      fs= ;;
 esac
-[ "$fs" = tmpfs ] && { echo "$T is on tmpfs" >&2; exit 2; }
+[ "$fs" = tmpfs ] && {
+  echo "$T is on tmpfs; set VMTOUCH_TEST_DIR to a writable, disk-backed directory" >&2
+  exit 2
+}
 
 PAGESIZE=$(getconf PAGESIZE)
 

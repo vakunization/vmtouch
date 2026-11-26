@@ -6,67 +6,63 @@ on:
   pull_request:
 
 jobs:
-  # Sanitizer build: memory correctness. Both test layers run here, but
-  # note ASan intercepts mlock(2), so the mlock-failure unit test self-skips
-  # (see test_cache.cpp) — the real syscall path is covered by the plain job.
-  test-sanitized:
-    runs-on: ubuntu-22.04
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: plain
+            build_type: Release
+            sanitize: 'OFF'
+          - name: sanitized
+            build_type: Debug
+            sanitize: 'ON'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install deps
+      - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential cmake
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DVMFTOUCH_SANITIZE=ON
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DVMFTOUCH_SANITIZE=${{ matrix.sanitize }}
+          -DWARN_FLAGS=-Werror
 
       - name: Build
-        run: cmake --build build -j
+        run: cmake --build build --parallel
 
-      - name: Verify sanitizer linked
-        run: ldd build/vmtouch | grep -qi 'libasan\|libubsan'
+      - name: Verify sanitizer linkage
+        if: matrix.sanitize == 'ON'
+        run: |
+          linked=$(ldd build/vmtouch)
+          grep -q libasan <<< "$linked"
+          grep -q libubsan <<< "$linked"
 
-      - name: Unit tests (ctest)
-        run: cd build && ctest --output-on-failure
-
-      - name: Characterization tests
+      - name: Run unit and CLI suites
         shell: bash
         env:
+          LC_ALL: C
           UBSAN_OPTIONS: print_stacktrace=1
         run: |
           set -o pipefail
-          mkdir -p logs
-          VMFILE=./build/vmtouch bash tests/run.sh 2>&1 | tee logs/test.log
+          ctest --test-dir build --verbose | tee test.log
 
       - name: Assert no sanitizer reports
+        if: matrix.sanitize == 'ON'
         run: |
-          if grep -E 'ERROR: AddressSanitizer|ERROR: LeakSanitizer|runtime error:|SUMMARY: UndefinedBehaviorSanitizer' logs/test.log; then
+          if grep -E 'SanitizerTool: CHECK failed|ERROR: (AddressSanitizer|LeakSanitizer)|runtime error:|SUMMARY: UndefinedBehaviorSanitizer' test.log; then
             echo "::error::sanitizer reported issues"
             exit 1
           fi
 
-      - name: Upload log
+      - name: Upload test log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-log
-          path: logs/
-
-  # Plain build: no instrumentation — real syscall behavior (mlock failure
-  # path), zero-warning gate with -Wall -Wextra, full test suite.
-  test-plain:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake
-
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build (warnings are errors)
-        run: cmake --build build -j -- WARN_FLAGS=-Werror
-
-      - name: Unit tests (ctest)
-        run: cd build && ctest --output-on-failure
+          name: test-log-${{ matrix.name }}
+          path: test.log
+          if-no-files-found: ignore

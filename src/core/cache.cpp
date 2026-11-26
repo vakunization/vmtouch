@@ -166,15 +166,12 @@ vmt::Result<int64_t> mincore_count(const Mapping& m, const detail::Syscalls& cal
     return vmt::Result<int64_t>::Ok(pages_resident);
 }
 
-// Reads the first byte of every page; this access IS the feature (it faults
-// pages in). The volatile accumulator keeps the dead stores; the loop is
-// never elided (read-back is unnecessary).
+// A volatile read faults in the first byte of every page and cannot be elided.
 void touch_pages(const Mapping& m) {
     const auto page_size = platform::page_size();
-    volatile uint64_t j = 0;
+    const auto* bytes = static_cast<const volatile char*>(m.region.mem());
     for (int64_t i = 0; i < m.pages_in_range; i++)
-        j += (static_cast<char*>(m.region.mem()))[i * page_size];
-    static_cast<void>(j);
+        static_cast<void>(bytes[i * page_size]);
 }
 
 // Unmaps a region inside a verb. unmap() clears the handle only on
