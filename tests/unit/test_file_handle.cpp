@@ -71,8 +71,7 @@ TEST(file_handle_open_missing_path_is_error_not_throw) {
 
 TEST(file_handle_open_unreadable_file_error_enoent_style) {
     if (getuid() == 0) {
-        std::printf("  skip unreadable-open test (running as root)\n");
-        return;
+        SKIP("running as root");
     }
     unit::TempFile f(1);
     EXPECT_EQ(chmod(f.path.c_str(), 0000), 0);
@@ -109,10 +108,4 @@ TEST(result_void_ok_and_error) {
     auto err = vmt::Result<void>::Error(Failure{Failure::Kind::Open, ENOENT, "/x", 0});
     EXPECT_TRUE(err.is_error());
     EXPECT_EQ(err.error().err, ENOENT);
-}
-
-TEST(result_is_nodiscard_type) {
-    // [[nodiscard]]: discarding a Result must warn. Compile-time property;
-    // this test documents intent (no runtime check possible).
-    EXPECT_TRUE(true);
 }

@@ -4,8 +4,7 @@
 //  * Zero dependencies: the whole unit-test suite builds with the same
 //    toolchain as the library (CI installs nothing extra).
 //  * Each test is a function registered via TEST(name) { ... }.
-//  * ASSERT_* aborts the current test on failure; EXPECT_* records and
-//    continues.
+//  * EXPECT_* records a failure and continues; SKIP ends the current test.
 //  * Setup helpers shared by several suites live in helpers.h.
 //
 // Scenario lens (see docs/embedder-scenarios.md):
@@ -53,9 +52,9 @@ inline int& failures() {
     return f;
 }
 
-inline const char*& current_test() {
-    static const char* c = "?";
-    return c;
+inline const char*& skip_reason() {
+    static const char* reason = nullptr;
+    return reason;
 }
 
 struct Registrar {
@@ -64,19 +63,25 @@ struct Registrar {
 
 inline int run_all() {
     int failed_tests = 0;
+    int skipped_tests = 0;
+    int passed_tests = 0;
     for (const auto& tc : registry()) {
-        current_test() = tc.name;
+        skip_reason() = nullptr;
         int before = failures();
         tc.fn();
         if (failures() > before) {
             failed_tests++;
             std::printf("FAIL %s\n", tc.name);
+        } else if (skip_reason()) {
+            skipped_tests++;
+            std::printf("SKIP %s (%s)\n", tc.name, skip_reason());
         } else {
+            passed_tests++;
             std::printf("ok   %s\n", tc.name);
         }
     }
-    std::printf("\n%zu checks failed in %d/%zu tests\n",
-                static_cast<size_t>(failures()), failed_tests, registry().size());
+    std::printf("\n%d passed, %d failed, %d skipped (%d failed checks)\n",
+                passed_tests, failed_tests, skipped_tests, failures());
     return failed_tests == 0 ? 0 : 1;
 }
 
@@ -90,6 +95,13 @@ inline int run_all() {
     static ::unit::Registrar UNIT_CONCAT(unit_reg_, __LINE__)(            \
         #name, &UNIT_CONCAT(unit_test_fn_, __LINE__));                    \
     static void UNIT_CONCAT(unit_test_fn_, __LINE__)()
+
+// reason must remain valid until the runner prints it (use a string literal).
+#define SKIP(reason)                                                      \
+    do {                                                                  \
+        ::unit::skip_reason() = (reason);                                  \
+        return;                                                           \
+    } while (0)
 
 #define UNIT_FAIL(fmt, ...)                                               \
     do {                                                                  \

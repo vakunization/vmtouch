@@ -201,7 +201,6 @@ TEST(crawl_hardlink_dedup_across_walks_on_one_crawler) {
     // B3: state lives for the CRAWLER's lifetime, so dedup holds ACROSS
     // roots walked through the same instance (run.sh pins "hl hl2 -> Files: 1").
     unit::TempFile f(1);
-    const std::string dir = f.path.substr(0, f.path.rfind('/'));
     char alias[] = "/tmp/vmtouch-crawl-alias-XXXXXX";
     const int afd = mkstemp(alias);
     EXPECT_TRUE(afd != -1);
@@ -263,8 +262,7 @@ TEST(crawl_trailing_slash_normalized) {
 TEST(crawl_not_regular_emits_error) {
     TempDir tree;
     if (::mkfifo(tree.child("pipe").c_str(), 0644) == -1) {
-        std::printf("  skip fifo test (mkfifo failed)\n");
-        return;
+        SKIP("mkfifo failed");
     }
 
     Crawler crawler;

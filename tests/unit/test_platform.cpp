@@ -47,8 +47,7 @@ TEST(raise_nofile_already_at_hard_limit_is_noop) {
     // (a no-op, not a failure) and must not touch the hard limit.
     struct rlimit r;
     if (getrlimit(RLIMIT_NOFILE, &r) != 0) {
-        std::printf("  skip rlimit noop test (getrlimit failed)\n");
-        return;
+        SKIP("getrlimit failed");
     }
     r.rlim_cur = r.rlim_max;
     (void)setrlimit(RLIMIT_NOFILE, &r);   // best effort; EPERM below is fine

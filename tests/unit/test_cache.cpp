@@ -10,6 +10,7 @@
 // temp files, which are private to the test process and deleted after.
 
 #include "helpers.h"
+#include "core/cache.h"
 
 #include <sys/mman.h>
 #include <sys/resource.h>   // getrlimit, RLIMIT_MEMLOCK
@@ -17,9 +18,6 @@
 namespace {
 
 using cache::Params;
-using cache::VerbOutcome;
-
-int64_t pages_for(int64_t bytes) { return (bytes + pagesize - 1) / pagesize; }
 
 } // namespace
 
@@ -39,7 +37,7 @@ TEST(cache_query_resident_count_is_consistent) {
     EXPECT_TRUE(m != MAP_FAILED);
     volatile char sum = 0;
     for (int64_t off = 0; off < f.size; off += 2 * pagesize)
-        sum += static_cast<char*>(m)[off];
+        sum = sum + static_cast<char*>(m)[off];
     munmap(m, f.size);
 
     auto r = cache::inspect(f.fd, Params{});
@@ -144,11 +142,7 @@ TEST(cache_mapped_region_ownership_and_move) {
     EXPECT_TRUE(moved.mem() == nullptr); // cleared — do NOT dereference after unmap
 }
 
-TEST(cache_evict_reports_advisory_failure_kind) {
-    // Eviction of a fresh private temp file normally succeeds; this test
-    // pins the Ok shape (stats populated, region empty). The failure kind
-    // (EvictAdviseFailed) cannot be triggered deterministically without a
-    // bad fd — pinned at the classification level in B6 via session tests.
+TEST(cache_evict_success_reports_stats_without_mapping) {
     unit::TempFile f(2);
     auto r = cache::evict(f.fd, Params{});
     EXPECT_TRUE(r.is_ok());
@@ -167,20 +161,17 @@ TEST(cache_evict_reports_advisory_failure_kind) {
 // raw-syscall comparison). The no-sanitizer CI run covers this test.
 TEST(cache_lock_failure_is_failed_record) {
 #ifdef __SANITIZE_ADDRESS__
-    std::printf("  skip lock-failure test (ASan intercepts mlock)\n");
-    return;
+    SKIP("ASan intercepts mlock");
 #endif
     struct rlimit rl;
     if (getrlimit(RLIMIT_MEMLOCK, &rl) != 0 || rl.rlim_cur == RLIM_INFINITY) {
-        std::printf("  skip lock-failure test (memlock unlimited)\n");
-        return;
+        SKIP("memlock limit unavailable or unlimited");
     }
     // File far larger than the memlock budget => mlock must fail.
     const int64_t need = static_cast<int64_t>(rl.rlim_cur) + 64 * 1024 * 1024;
     const int npages = static_cast<int>((need + pagesize - 1) / pagesize);
     if (npages > 2000000) {   // keep the temp file bounded (8 TB page space guard)
-        std::printf("  skip lock-failure test (rlimit too large)\n");
-        return;
+        SKIP("memlock limit too large for the fixture");
     }
     unit::TempFile f(npages);
     auto r = cache::lock(f.fd, Params{});

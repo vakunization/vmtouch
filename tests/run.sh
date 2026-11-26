@@ -32,9 +32,10 @@ esac
 
 PAGESIZE=$(getconf PAGESIZE)
 
-PASS=0 FAIL=0
+PASS=0 FAIL=0 SKIP=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$*"; }
 fail() { FAIL=$((FAIL+1)); printf '  FAIL %s\n       %s\n' "$1" "$2"; }
+skip() { SKIP=$((SKIP+1)); printf '  skip %s\n' "$*"; }
 
 eq()     { [ "$1" = "$2" ] && ok "$3" || fail "$3" "got '$1', want '$2'"; }
 has()    { grep -qF -- "$2" <<<"$1" && ok "$3" || fail "$3" "missing '$2' in: ${1:0:200}"; }
@@ -75,11 +76,10 @@ has "$($VMFILE --help)" "Usage: vmtouch" "--help output contains usage"
 "$VMFILE" -t "$T/ten" >/dev/null 2>&1
 out=$("$VMFILE" -o kv "$T/ten" 2>/dev/null)
 eq "$(resident_pages "$out")" 10 "-t makes all 10 pages resident"
-eq "$(total_pages "$out")" 10 "-v.. -o kv reports total 10"
+eq "$(total_pages "$out")" 10 "-o kv reports total 10"
 
 out=$("$VMFILE" "$T/ten" 2>/dev/null)
 has "$out" "Resident Pages: 10/10" "query summary shows full residency"
-lacks "$out" "[" "-v totals-only: no chart in summary output"
 
 out=$("$VMFILE" -o kv "$T/one" 2>&1)
 has "$out" "Files=1 "        "-o kv Files"
@@ -88,14 +88,15 @@ has "$out" "ResidentPages="  "-o kv ResidentPages"
 has "$out" "TotalSize="      "-o kv TotalSize"
 
 # empty file: counted as a file, zero pages, NOT a failure
-out=$("$VMFILE" -o kv "$T/empty" 2>&1)
+out=$("$VMFILE" -o kv "$T/empty" 2>&1); rc=$?
 eq "$(files_count "$out")" 1 "empty file counted"
 eq "$(total_pages "$out")" 0 "empty file: zero pages"
-rc_is $? 0 "empty file exits 0"
+rc_is "$rc" 0 "empty file exits 0"
 
 # -v is accepted (totals-only) and silent per-file
 out=$("$VMFILE" -v "$T/one" 2>&1); rc_is $? 0 "-v accepted"
 lacks "$out" "$T/one" "-v: no per-file path echo (ratified deviation)"
+lacks "$out" "[" "-v: no residency chart in summary output"
 
 # -v writes to stdout, warnings to stderr
 out=$("$VMFILE" -v "$T/one" 2>/dev/null)
@@ -120,9 +121,9 @@ out=$("$VMFILE" -o kv -p 0-1M "$T/big" 2>/dev/null)
 eq "$(total_pages "$out")" "$np1m" "-p 0-1M covers $np1m pages"
 
 # multiple -p: last one wins (the range is session Options.range)
-"$VMFILE" -t -p "0-$p1" -p "0-$p5" "$T/ten" >/dev/null 2>&1
-out=$("$VMFILE" -o kv "$T/ten" 2>/dev/null)
-ge "$(resident_pages "$out")" 5 "multiple -p: last one wins (5 pages touched)"
+out=$("$VMFILE" -t -o kv -p "0-$p1" -p "0-$p5" "$T/ten" 2>&1); rc=$?
+rc_is "$rc" 0 "multiple -p: exits 0"
+eq "$(total_pages "$out")" 5 "multiple -p: last one wins (5 pages selected)"
 
 # --- crawling (counts via summary) -------------------------------------------
 
@@ -192,7 +193,7 @@ case $? in
     fail "-t -p" "output parser broke (summary format changed?)"
     ;;
   *)
-    echo "  skip -t -p (cannot evict $T/big)"
+    skip "-t -p (cannot evict $T/big)"
     ;;
 esac
 
@@ -260,7 +261,7 @@ if [ "$(id -u)" != 0 ]; then
   eq "$(files_count "$out")" 1 "unreadable file still counted (failed)"
   chmod 644 "$T/noread"
 else
-  echo "  skip unreadable-file test (running as root)"
+  skip "unreadable-file test (running as root)"
 fi
 
 # unreadable directory: warns with the upstream opendir text
@@ -272,7 +273,7 @@ if [ "$(id -u)" != 0 ]; then
   has "$out" "unable to opendir $T/nodir" "unreadable dir warns with opendir text"
   chmod 755 "$T/nodir"
 else
-  echo "  skip unreadable-dir test (running as root)"
+  skip "unreadable-dir test (running as root)"
 fi
 
 # -p offset beyond EOF: warning, file skipped
@@ -310,12 +311,12 @@ if [ "$(id -u)" != 0 ]; then
     rc_is "$rc" 124 "-l run blocks in select() as upstream (timeout kill)"
     rm -f "$T/lockme"
   else
-    echo "  skip mlock-warning test (no non-sanitizer binary; set VMFILE_PLAIN)"
+    skip "mlock-warning test (no non-sanitizer binary; set VMFILE_PLAIN)"
   fi
 else
-  echo "  skip mlock-warning test (running as root)"
+  skip "mlock-warning test (running as root)"
 fi
 
 echo
-echo "$PASS passed, $FAIL failed"
+echo "$PASS passed, $FAIL failed, $SKIP skipped"
 [ $FAIL -eq 0 ]

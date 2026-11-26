@@ -6,18 +6,19 @@
 // S3 (mlock loader) — caller-owned fd, WHY-it-failed.
 
 #include "helpers.h"
+#include "core/session.h"
 
 #include <cerrno>
+#include <memory>
 
 namespace {
 
 struct Fixture {
-    unit::WarningCapture warn;
     std::unique_ptr<vmt::Session> session;
 
-    explicit Fixture(const FileInfoRange& range = {}, bool quiet = false) {
-        session = unit::make_session(unit::make_shared_state(), warn, range, quiet);
-    }
+    explicit Fixture(const FileInfoRange& range = {})
+        : session(std::make_unique<vmt::Session>(
+              Options{.range = range, .collect_failures = true})) {}
 
     std::span<const std::string> one(const std::string& p) {
         roots_.assign(1, p);
@@ -118,28 +119,14 @@ TEST(session_empty_file_counted_not_failed) {
 }
 
 TEST(session_collect_failures_false_still_counts_failed) {
-    auto state = unit::make_shared_state();
-    unit::WarningCapture warn;
-    Options o;
-    o.collect_failures = false;
-    auto session = std::make_unique<vmt::Session>(o);
+    vmt::Session session(Options{.collect_failures = false});
 
     const std::vector<std::string> roots = {"/tmp/vmtouch-no-such-file-evar"};
-    (void)session->process(span_of(roots));
+    (void)session.process(span_of(roots));
 
-    const vmt::Session::Report& r = session->get_report();
+    const vmt::Session::Report& r = session.get_report();
     EXPECT_EQ(r.failed, 1);                 // counted regardless
     EXPECT_EQ(r.failures.size(), (size_t)0);  // but not collected
-}
-
-TEST(session_quiet_flag_no_longer_gates_records) {
-    // A1/B4: the library records facts; the CLI applies quiet at print time.
-    unit::TempFile f(1);
-    Fixture fx(/*range=*/{}, /*quiet=*/true);
-
-    (void)fx.session->process(fx.one(f.path));
-
-    EXPECT_EQ(fx.session->get_report().total_files, 1);
 }
 
 // ---------------------------------------------------------------------------
