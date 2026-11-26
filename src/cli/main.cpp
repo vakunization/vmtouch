@@ -24,19 +24,6 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 ***********************************************************************/
 
 
-#if defined(__linux__) || (defined(__hpux) && !defined(__LP64__))
-// Make sure off_t is 64 bits on linux and when creating 32bit programs
-// on HP-UX.
-#define _FILE_OFFSET_BITS 64
-#endif
-
-#ifdef __linux__
-// Required for posix_fadvise() on some linux systems
-#define _XOPEN_SOURCE 600
-// Required for mincore() on some linux systems
-#define _DEFAULT_SOURCE
-#endif
-
 #include <cerrno>
 #include <charconv>
 #include <cctype>
@@ -270,6 +257,13 @@ static std::string pretty_print_size(int64_t bytes) {
   return std::format("{}{}", v, unit[u]);
 }
 
+static int64_t pages_to_bytes(int64_t pages) {
+  const auto page_size = platform::page_size();
+  if (pages < 0 || pages > INT64_MAX / page_size)
+    fatal("page count is too large to report in bytes");
+  return pages * page_size;
+}
+
 // Parses "4096", "4k", "100M", "1.5G" (case-insensitive suffix).
 int64_t parse_size(std::string_view inp) {
   const std::string_view errstr = "bad size. examples: 4096, 4k, 100M, 1.5G";
@@ -289,15 +283,25 @@ int64_t parse_size(std::string_view inp) {
     inp.remove_suffix(1);
   }
 
-  double val = 0;
   const char* begin = inp.data();
   const char* end = inp.data() + inp.size();
+  int64_t whole = 0;
+  const auto integer = std::from_chars(begin, end, whole);
+  if (integer.ec == std::errc{} && integer.ptr == end) {
+    if (whole < 0 || whole > INT64_MAX / mult)
+      fatal(errstr);
+    return whole * mult;
+  }
+
+  double val = 0;
   const auto [ptr, ec] = std::from_chars(begin, end, val);
-  if (ec != std::errc{} || ptr != end || val < 0)
+  if (ec != std::errc{} || ptr != end)
     fatal(errstr);
 
   val *= mult;
-  if (val > static_cast<double>(INT64_MAX))
+  // INT64_MAX rounds up when converted to double. Use the exclusive 2^63
+  // bound directly; these comparisons also reject infinities and NaNs.
+  if (!(val >= 0.0 && val < 0x1p63))
     fatal(errstr);
 
   return static_cast<int64_t>(val);
@@ -330,8 +334,8 @@ FileInfoRange parse_range(std::string_view inp) {
       upper_range = parse_size(rest);   // value after hyphen
   }
 
-  // offset must be multiple of pagesize
-  f.offset = (lower_range / pagesize) * pagesize;
+  const auto page_size = platform::page_size();
+  f.offset = (lower_range / page_size) * page_size;
 
   if (upper_range) {
     if (upper_range <= f.offset)
@@ -560,8 +564,8 @@ static void print_summary(const vmt::Session::Report& rep, const CliOptions& o) 
   if (o.quiet)
     return;
 
-  const int64_t total_pages_in_core_size = rep.total_pages_in_core * pagesize;
-  const int64_t total_pages_size         = rep.total_pages * pagesize;
+  const int64_t total_pages_in_core_size = pages_to_bytes(rep.total_pages_in_core);
+  const int64_t total_pages_size         = pages_to_bytes(rep.total_pages);
   // Guard the division: an all-empty-files run has total_pages == 0, and
   // an unguarded kv Percent prints -nan.
   const double  total_pages_in_core_perc =
@@ -602,8 +606,6 @@ static void print_summary(const vmt::Session::Report& rep, const CliOptions& o) 
 static int run(int argc, char **argv) {
   CliOptions o;          // CLI-level state (never rides on core Options)
   Options lib_opts;      // the library's Options (verb/range/max_file_size/collect)
-
-  platform::init();
 
   const std::vector<std::string_view> operands = parse_cli_args(argc, argv, o, lib_opts, lib_opts.range);
   validate_cli(o, operands);
@@ -647,7 +649,7 @@ static int run(int argc, char **argv) {
     }
 
     if (!o.quiet)
-      std::cout << std::format("LOCKED {} pages ({})\n", rep.total_pages, pretty_print_size(rep.total_pages * pagesize));
+      std::cout << std::format("LOCKED {} pages ({})\n", rep.total_pages, pretty_print_size(pages_to_bytes(rep.total_pages)));
 
     if (o.wait) reopen_all();
 

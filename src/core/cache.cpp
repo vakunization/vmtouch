@@ -33,7 +33,8 @@ bool is_retryable(int err) {
 }
 
 int64_t bytes2pages(int64_t bytes) {
-    return (bytes + pagesize - 1) / pagesize;
+    const auto page_size = platform::page_size();
+    return bytes / page_size + (bytes % page_size != 0);
 }
 
 // Runs one syscall with the retry policy. `call` returns 0 on success and
@@ -74,6 +75,11 @@ struct Mapping {
 vmt::Result<void> prelude(int fd, const Params& p, Mapping& m, bool& skipped_ok) {
     skipped_ok = false;
     int err = 0;
+
+    if (p.range.offset < 0 || p.range.max_len < 0 ||
+        p.range.offset % platform::page_size() != 0)
+        return vmt::Result<void>::Error(
+            Failure{Failure::Kind::Map, EINVAL, "", p.range.offset});
 
     struct stat sb;
     if (!retry_op([&] { return fstat(fd, &sb); }, err))
@@ -158,9 +164,10 @@ vmt::Result<int64_t> mincore_count(const Mapping& m) {
 // pages in). The volatile accumulator keeps the dead stores; the loop is
 // never elided (read-back is unnecessary).
 void touch_pages(const Mapping& m) {
+    const auto page_size = platform::page_size();
     volatile uint64_t j = 0;
     for (int64_t i = 0; i < m.pages_in_range; i++)
-        j += (static_cast<char*>(m.region.mem()))[i * pagesize];
+        j += (static_cast<char*>(m.region.mem()))[i * page_size];
     static_cast<void>(j);
 }
 

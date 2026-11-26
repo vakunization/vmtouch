@@ -18,17 +18,15 @@
 // the pure helpers where possible).
 
 TEST(page_size_is_sane) {
-    platform::init();
-    EXPECT_EQ(pagesize, sysconf(_SC_PAGESIZE));
-    EXPECT_TRUE(pagesize == 4096 || pagesize == 8192 ||
-                pagesize == 16384 || pagesize == 65536);
+    EXPECT_EQ(platform::page_size(), sysconf(_SC_PAGESIZE));
+    EXPECT_TRUE(platform::page_size() > 0);
 }
 
 TEST(aligned_p_basic) {
-    platform::init();
+    const auto page_size = platform::page_size();
     EXPECT_TRUE(platform::aligned_p(nullptr));                     // offset 0
-    EXPECT_TRUE(platform::aligned_p(reinterpret_cast<const void*>(static_cast<uintptr_t>(pagesize))));
-    EXPECT_FALSE(platform::aligned_p(reinterpret_cast<const void*>(static_cast<uintptr_t>(pagesize - 1))));
+    EXPECT_TRUE(platform::aligned_p(reinterpret_cast<const void*>(static_cast<uintptr_t>(page_size))));
+    EXPECT_FALSE(platform::aligned_p(reinterpret_cast<const void*>(static_cast<uintptr_t>(page_size - 1))));
     EXPECT_FALSE(platform::aligned_p(reinterpret_cast<const void*>(1)));
 }
 

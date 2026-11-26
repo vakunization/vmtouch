@@ -9,7 +9,7 @@
 #include <string>
 
 #include "test.h"
-#include "core/common.h"
+#include "core/platform.h"
 
 namespace unit {
 
@@ -22,7 +22,7 @@ struct TempFile {
     int64_t size;   // bytes
 
     explicit TempFile(int n_pages)
-        : size(static_cast<int64_t>(n_pages) * pagesize) {
+        : size(static_cast<int64_t>(n_pages) * platform::page_size()) {
         char tmpl[] = "/tmp/vmtouch-unit-XXXXXX";
         fd = mkstemp(tmpl);
         if (fd == -1) { std::perror("mkstemp"); std::abort(); }

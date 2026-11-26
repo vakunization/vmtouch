@@ -18,6 +18,12 @@ target_link_libraries(vmtouch PRIVATE vmtouch_core)
 target_include_directories(vmtouch_core PUBLIC src tests)
 target_include_directories(vmtouch PRIVATE src)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(vmtouch_core PUBLIC _FILE_OFFSET_BITS=64 _DEFAULT_SOURCE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "HP-UX" AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    target_compile_definitions(vmtouch_core PUBLIC _FILE_OFFSET_BITS=64)
+endif()
+
 # Warning flags: -Wall -Wextra always; CI's plain job passes
 # -DWARN_FLAGS=-Werror to make any warning fatal.
 set(WARN_FLAGS "" CACHE STRING "Extra warning flags (e.g. -Werror)")

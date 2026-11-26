@@ -36,7 +36,7 @@ TEST(cache_query_resident_count_is_consistent) {
     void* m = mmap(nullptr, f.size, PROT_READ, MAP_SHARED, f.fd, 0);
     EXPECT_TRUE(m != MAP_FAILED);
     volatile char sum = 0;
-    for (int64_t off = 0; off < f.size; off += 2 * pagesize)
+    for (int64_t off = 0; off < f.size; off += 2 * platform::page_size())
         sum = sum + static_cast<char*>(m)[off];
     munmap(m, f.size);
 
@@ -79,7 +79,7 @@ TEST(cache_empty_file_silent_ok_zero_stats) {
 TEST(cache_file_larger_than_max_is_error_with_kind) {
     unit::TempFile f(2);
     Params p;
-    p.max_file_size = static_cast<size_t>(pagesize);   // -m 1 page
+    p.max_file_size = static_cast<size_t>(platform::page_size());   // -m 1 page
     auto r = cache::inspect(f.fd, p);
 
     EXPECT_TRUE(r.is_error());
@@ -91,20 +91,20 @@ TEST(cache_file_larger_than_max_is_error_with_kind) {
 TEST(cache_offset_beyond_eof_is_error_with_offset) {
     unit::TempFile f(2);
     Params p;
-    p.range.offset = 10 * pagesize;
+    p.range.offset = 10 * platform::page_size();
     auto r = cache::inspect(f.fd, p);
 
     EXPECT_TRUE(r.is_error());
     EXPECT_EQ((int)r.error().kind, (int)Failure::Kind::BeyondEof);
-    EXPECT_EQ(r.error().offset, 10 * pagesize);
+    EXPECT_EQ(r.error().offset, p.range.offset);
 }
 
 TEST(cache_partial_range_counts_only_selected_pages) {
     unit::TempFile f(4);
     // -p second page only: offset = 1 page, max_len = 1 page
     Params p;
-    p.range.offset = pagesize;
-    p.range.max_len = pagesize;
+    p.range.offset = platform::page_size();
+    p.range.max_len = platform::page_size();
     auto r = cache::inspect(f.fd, p);
 
     EXPECT_TRUE(r.is_ok());
@@ -169,7 +169,8 @@ TEST(cache_lock_failure_is_failed_record) {
     }
     // File far larger than the memlock budget => mlock must fail.
     const int64_t need = static_cast<int64_t>(rl.rlim_cur) + 64 * 1024 * 1024;
-    const int npages = static_cast<int>((need + pagesize - 1) / pagesize);
+    const auto page_size = platform::page_size();
+    const int npages = static_cast<int>((need + page_size - 1) / page_size);
     if (npages > 2000000) {   // keep the temp file bounded (8 TB page space guard)
         SKIP("memlock limit too large for the fixture");
     }
@@ -202,7 +203,8 @@ TEST(cache_unmap_keeps_region_live_on_failure) {
     // munmap(2). MappedRegion is constructed directly (it is the test's
     // prerogative) with a misaligned pointer.
     unit::TempFile f(1);
-    void* m = mmap(nullptr, f.size + pagesize, PROT_READ, MAP_SHARED, f.fd, 0);
+    const auto length = f.size + platform::page_size();
+    void* m = mmap(nullptr, length, PROT_READ, MAP_SHARED, f.fd, 0);
     EXPECT_TRUE(m != MAP_FAILED);
     void* misaligned = static_cast<char*>(m) + 1;
     cache::MappedRegion region(misaligned, f.size);
@@ -222,6 +224,6 @@ TEST(cache_unmap_keeps_region_live_on_failure) {
 
     // Release the underlying mapping directly; the destructor's final munmap
     // on the (misaligned, already-dead) address is then harmless on Linux.
-    EXPECT_TRUE(munmap(m, f.size + pagesize) == 0);
+    EXPECT_TRUE(munmap(m, length) == 0);
     region = cache::MappedRegion{};
 }

@@ -125,6 +125,16 @@ out=$("$VMFILE" -t -o kv -p "0-$p1" -p "0-$p5" "$T/ten" 2>&1); rc=$?
 rc_is "$rc" 0 "multiple -p: exits 0"
 eq "$(total_pages "$out")" 5 "multiple -p: last one wins (5 pages selected)"
 
+# Numeric parsing: reject out-of-range values before converting to int64_t.
+for size in 9223372036854775808 8589934592G nanM; do
+  out=$("$VMFILE" -p "$size" "$T/one" 2>&1); rc=$?
+  rc_is "$rc" 1 "invalid size rejected: $size"
+  has "$out" "bad size" "invalid size diagnostic: $size"
+done
+out=$("$VMFILE" -o kv -p 9223372036854775807 "$T/one" 2>&1); rc=$?
+rc_is "$rc" 0 "INT64_MAX range length accepted"
+eq "$(total_pages "$out")" 1 "maximum range length capped at EOF"
+
 # --- crawling (counts via summary) -------------------------------------------
 
 out=$("$VMFILE" -o kv "$T/d" 2>/dev/null)

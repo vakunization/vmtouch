@@ -12,21 +12,20 @@
 
 #include "common.h"
 
-// Definition of the global declared in core/common.h. Lives in the library
-// so the core links standalone. Set by platform::init().
-long pagesize = 4096;
-
 namespace platform {
 
-void init() {
-    const long ps = sysconf(_SC_PAGESIZE);
-    if (ps <= 0)   // -1 (error) or 0 (never true, but poison either way)
-        throw FatalError("sysconf(_SC_PAGESIZE) failed");
-    pagesize = ps;
+long page_size() {
+    static const long value = [] {
+        const long ps = sysconf(_SC_PAGESIZE);
+        if (ps <= 0)
+            throw FatalError("sysconf(_SC_PAGESIZE) failed");
+        return ps;
+    }();
+    return value;
 }
 
 bool aligned_p(const void* p) {
-    return 0 == (reinterpret_cast<uintptr_t>(p) & (static_cast<uintptr_t>(pagesize) - 1));
+    return reinterpret_cast<uintptr_t>(p) % static_cast<uintptr_t>(page_size()) == 0;
 }
 
 bool is_mincore_page_resident(unsigned char mincore_byte) {

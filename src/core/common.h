@@ -8,10 +8,8 @@
 #include <stdexcept>
 #include <string>
 
-// Set once at startup by the CLI (platform::init()).
-extern long pagesize;
-
-// Per-file selection range (from -p). {0,0} = whole file.
+// Per-file selection. Both values are non-negative; offset is page-aligned.
+// max_len == 0 means to EOF, so {0,0} selects the whole file.
 struct FileInfoRange {
     int64_t offset = 0;
     int64_t max_len = 0;

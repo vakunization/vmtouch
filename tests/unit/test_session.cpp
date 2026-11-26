@@ -96,8 +96,8 @@ TEST(session_report_resets_between_calls) {
 TEST(session_range_selects_pages) {
     unit::TempFile f(3);
     FileInfoRange r;
-    r.offset = pagesize;
-    r.max_len = pagesize;
+    r.offset = platform::page_size();
+    r.max_len = platform::page_size();
     Fixture fx(r);
 
     (void)fx.session->process(fx.one(f.path));
@@ -164,7 +164,8 @@ TEST(session_process_fd_range) {
     unit::TempFile f(4);
     Fixture fx;
 
-    (void)fx.session->process_fd(f.fd, pagesize, pagesize);   // second page only
+    const auto page_size = platform::page_size();
+    (void)fx.session->process_fd(f.fd, page_size, page_size);   // second page only
 
     EXPECT_EQ(fx.session->get_report().total_pages, 1);
 }
@@ -186,11 +187,33 @@ TEST(session_process_fd_beyond_eof_records_beyond_eof) {
     unit::TempFile f(1);
     Fixture fx;
 
-    (void)fx.session->process_fd(f.fd, 10 * pagesize, 0);
+    (void)fx.session->process_fd(f.fd, 10 * platform::page_size(), 0);
 
     const vmt::Session::Report& r = fx.session->get_report();
     EXPECT_EQ(r.failed, 1);
     EXPECT_EQ((int)r.failures[0].kind, (int)Failure::Kind::BeyondEof);
+}
+
+TEST(session_invalid_ranges_are_per_file_failures) {
+    unit::TempFile f(1);
+    Fixture fx;
+    const FileInfoRange invalid[] = {{-1, 0}, {0, -1}, {1, 0}};
+    for (const auto& range : invalid) {
+        EXPECT_EQ(fx.session->process_fd(f.fd, range.offset, range.max_len), Status::Ok);
+        const auto& r = fx.session->get_report();
+        EXPECT_EQ(r.total_pages, 0);
+        EXPECT_EQ(r.failed, 1);
+        EXPECT_EQ(r.failures.size(), size_t{1});
+        if (!r.failures.empty()) {
+            EXPECT_EQ(r.failures[0].kind, Failure::Kind::Map);
+            EXPECT_EQ(r.failures[0].err, EINVAL);
+            EXPECT_EQ(r.failures[0].offset, range.offset);
+        }
+    }
+
+    Fixture by_path({0, -1});
+    EXPECT_EQ(by_path.session->process(by_path.one(f.path)), Status::Ok);
+    EXPECT_EQ(by_path.session->get_report().failed, 1);
 }
 
 TEST(session_get_report_zeroed_before_any_call) {

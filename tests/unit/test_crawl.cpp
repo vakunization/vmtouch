@@ -58,7 +58,7 @@ struct TempDir {
         const std::string p = child(name);
         FILE* fp = std::fopen(p.c_str(), "w");
         if (!fp) { std::perror("fopen"); std::abort(); }
-        if (ftruncate(::fileno(fp), static_cast<int64_t>(n_pages) * pagesize) == -1) {
+        if (ftruncate(::fileno(fp), static_cast<int64_t>(n_pages) * platform::page_size()) == -1) {
             std::perror("ftruncate");
             std::abort();
         }

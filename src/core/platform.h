@@ -9,8 +9,9 @@
 
 namespace platform {
 
-// Reads the page size once into ::pagesize. Must run before other core code.
-void init();
+// Returns the system page size. Cached on first use; throws FatalError if
+// the operating system cannot provide it.
+long page_size();
 
 // True if p is page-aligned.
 bool aligned_p(const void* p);

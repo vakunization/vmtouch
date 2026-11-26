@@ -64,7 +64,8 @@ public:
     // Status::Fatal internally); bad_alloc propagates.
     Status process(std::span<const std::string> paths);
 
-    // S3: caller-owned fd; same Report semantics as process().
+    // Caller-owned fd; same Report semantics as process(). Ranges must be
+    // non-negative and offsets page-aligned; invalid ranges fail with Map/EINVAL.
     Status process_fd(int fd, int64_t offset, int64_t max_len);
 
     // The Report of the LAST process()/process_fd() call. Valid until the
